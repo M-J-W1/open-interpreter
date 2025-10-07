@@ -76,6 +76,35 @@ class Llm:
         # Reasoning effort passthrough (providers that support it: e.g., OpenAI o4)
         self.reasoning_effort = None  # "low" | "medium" | "high"
 
+    def _ensure_responses_message_shape(self, m):
+        out = {"role": m.get("role", "user")}
+        c = m.get("content", "")
+        # Convert Chat-style content → Responses-style typed parts
+        if isinstance(c, str):
+            out["content"] = [{"type": "text", "text": c}]
+        elif isinstance(c, list):
+            parts = []
+            for p in c:
+                t = p.get("type")
+                if t == "text" and "text" in p:
+                    parts.append({"type": "text", "text": p["text"]})
+                elif t == "image_url":
+                    # Chat format: {"type":"image_url","image_url":{"url": "..."}}
+                    image_url = p.get("image_url", {})
+                    if isinstance(image_url, dict):
+                        url = image_url.get("url")
+                    else:
+                        url = image_url  # already a string
+                    if url:
+                        parts.append({"type": "input_image", "image_url": url})
+                else:
+                    # Pass through already-correct parts (e.g., {"type":"input_image",...})
+                    parts.append(p)
+            out["content"] = parts if parts else [{"type":"text","text":""}]
+        else:
+            out["content"] = [{"type": "text", "text": str(c)}]
+        return out
+
     def run(self, messages):
         """
         We're responsible for formatting the call into the llm.completions object,
@@ -289,6 +318,19 @@ Continuing...
         #     "stream": True,
         # }
 
+        # Guarantee no duplicate system item when using `instructions`
+        if messages and messages[0].get("role") == "system":
+            # If trim except path re-inserted a system message, pull it back out
+            sys_c = messages[0].get("content", "")
+            if isinstance(sys_c, list):
+                system_message = "".join(p.get("text","") for p in sys_c if p.get("type")=="text")
+            else:
+                system_message = sys_c
+            messages = messages[1:]
+
+        # Coerce each message for Responses
+        messages = [self._ensure_responses_message_shape(m) for m in messages]
+
         # Responses parameters
         params = {
             "model": model,
@@ -436,23 +478,30 @@ Continuing...
                 pass
 
 def _responses_events_to_chat_deltas(events_iter):
-    """
-    Adapt Responses stream events into a simple sequence of {delta: {content: "..."}}
-    for existing handlers that expect chat.completions deltas.
-    """
+    """Adapt Responses events to Chat-like deltas."""
+    sent_role = False
     for ev in events_iter:
-        # LiteLLM passes through the OpenAI Responses events.
-        # Text deltas:
-        if getattr(ev, "type", None) in ("response.output_text.delta", "response.output_text"):
-            # ev.delta or ev.text depending on event object – LiteLLM normalizes to attrs
+        ev_type = getattr(ev, "type", None)
+
+        # Emit the role once, early
+        if not sent_role and ev_type and ev_type.startswith("response."):
+            sent_role = True
+            yield {"choices": [{"delta": {"role": "assistant"}}]}
+
+        if ev_type in ("response.output_text.delta", "response.output_text"):
             chunk = getattr(ev, "delta", None) or getattr(ev, "text", "")
             if chunk:
                 yield {"choices": [{"delta": {"content": chunk}}]}
-        # Tool calls (forward the raw object so your tool runner can branch on it)
-        elif getattr(ev, "type", "").startswith(("response.tool_call", "tool")):
+        elif ev_type and ev_type.startswith(("response.tool_call", "tool")):
+            # forward tool events unchanged for your tool runner
             yield {"tool_event": ev}
-        # Finalization:
-        elif getattr(ev, "type", "") in ("response.completed", "response.error"):
+        elif ev_type == "response.completed":
+            # mirror Chat finish token
+            yield {"choices": [{"finish_reason": "stop"}]}
+            break
+        elif ev_type == "response.error":
+            # surface an error-like finish
+            yield {"choices": [{"finish_reason": "error"}]}
             break
 
 def fixed_litellm_completions(**params):
