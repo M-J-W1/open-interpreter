@@ -1,4 +1,4 @@
-from builtins import print, type
+from builtins import list, print, type
 import os
 
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
@@ -615,6 +615,8 @@ def fixed_litellm_completions(**params):
         try:
             #yield from litellm.completion(**params) # Chat completions
             # Responses
+            print("[responses] calling litellm.responses with keys:",
+                list(params.keys()), flush=True)
             events = litellm.responses(**params)
             for delta in _responses_events_to_chat_deltas(events):
                 yield delta
@@ -623,6 +625,7 @@ def fixed_litellm_completions(**params):
             print("Exiting...")
             sys.exit(0)
         except Exception as e:
+            print(f"[responses attempt {attempt}] exception: {type(e).__name__}: {e}", flush=True)
             if attempt == 0:
                 # Store the first error
                 first_error = e
