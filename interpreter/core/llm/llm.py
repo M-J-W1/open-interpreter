@@ -150,7 +150,7 @@ class Llm:
 
         print("[run] START. model=", self.model, "supports_functions=", self.supports_functions,
             "supports_vision=", self.supports_vision, flush=True)
-        print("[run] incoming messages (raw):", messages, flush=True)
+        #print("[run] incoming messages (raw):", messages, flush=True)
 
         if not self._is_loaded:
             self.load()
@@ -287,9 +287,9 @@ class Llm:
             interpreter=self.interpreter,
         )
 
-        print("[run] after convert_to_openai_messages. First item type:",
-        type(messages[0]).__name__, flush=True)
-        print("[run] sample[0]:", messages[0], flush=True)
+        #print("[run] after convert_to_openai_messages. First item type:",
+        #type(messages[0]).__name__, flush=True)
+        #print("[run] sample[0]:", messages[0], flush=True)
 
         system_message = messages[0]["content"]
         messages = messages[1:]

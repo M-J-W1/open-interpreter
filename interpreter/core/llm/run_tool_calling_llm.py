@@ -1,3 +1,4 @@
+from builtins import print
 import os
 import re
 
@@ -99,6 +100,9 @@ def process_messages(messages):
 
 
 def run_tool_calling_llm(llm, request_params):
+    
+    print("[run_tool_calling_llm] keys in request_params:", list(request_params.keys()), flush=True)
+
     ## Setup
 
     # Add languages OI has access to
@@ -107,7 +111,27 @@ def run_tool_calling_llm(llm, request_params):
     ]
     request_params["tools"] = [tool_schema]
 
-    request_params["messages"] = process_messages(request_params["messages"])
+    # request_params["messages"] = process_messages(request_params["messages"]) # Chat Completions ONLY
+    
+    # Accept both shapes; prefer Responses "input"
+    msgs = None
+    if "input" in request_params:
+        msgs = request_params["input"]
+    elif "messages" in request_params:
+        # Legacy fallback: allow old callers to still work
+        msgs = request_params["messages"]
+    else:
+        msgs = []
+
+    # Run the same tool-call normalization over whichever we got
+    msgs = process_messages(msgs)
+
+    # Keep it in Responses shape for litellm.responses()
+    request_params["input"] = msgs
+
+    # IMPORTANT: do not keep/restore a "messages" key when using Responses
+    if "messages" in request_params:
+        del request_params["messages"]
 
     # # This makes any role: tool have the ID of the last tool call
     # last_tool_id = 0

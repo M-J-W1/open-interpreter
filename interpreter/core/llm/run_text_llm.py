@@ -1,18 +1,70 @@
 def run_text_llm(llm, params):
-    ## Setup
 
-    if llm.execution_instructions:
+    # ## Setup (Chat Completions ONLY)
+    # if llm.execution_instructions:
+    #     try:
+    #         # Add the system message
+    #         params["messages"][0][
+    #             "content"
+    #         ] += "\n" + llm.execution_instructions
+    #     except:
+    #         print('params["messages"][0]', params["messages"][0])
+    #         raise
+
+    ## Setup (Responses-style Completions)
+
+    # --- 1) Ensure Responses shape; accept legacy Chat Completions as input ---
+    if "instructions" not in params and "messages" in params:
+        msgs = params.get("messages", []) or []
+
+        # Pull out system → instructions (if present), keep the rest as input
+        sys_txt = ""
+        if msgs and msgs[0].get("role") == "system":
+            sys_txt = msgs[0].get("content", "")
+            msgs = msgs[1:]
+
+        # Normalize each message to Responses-style role/content parts
         try:
-            # Add the system message
-            params["messages"][0][
-                "content"
-            ] += "\n" + llm.execution_instructions
-        except:
-            print('params["messages"][0]', params["messages"][0])
-            raise
+            msgs = [llm._ensure_responses_message_shape(m) for m in msgs]
+        except Exception:
+            # Fallback: best-effort coercion
+            norm = []
+            for m in msgs:
+                role = m.get("role", "user")
+                c = m.get("content", "")
+                if isinstance(c, str):
+                    c = [{"type": "text", "text": c}]
+                elif isinstance(c, list):
+                    # try to keep as-is
+                    pass
+                else:
+                    c = [{"type": "text", "text": str(c)}]
+                norm.append({"role": role, "content": c})
+            msgs = norm
+
+        params["instructions"] = sys_txt
+        params["input"] = msgs
+        # Remove legacy key so litellm.responses() won't see it
+        del params["messages"]
+
+    # Sanity defaults if caller already provided Responses shape
+    params.setdefault("instructions", "")
+    params.setdefault("input", [])
+
+    # --- 2) Append execution instructions to Responses.instructions ---
+    if llm.execution_instructions:
+        instr = params.get("instructions", "")
+        # If some upstream provided a list of text parts, flatten to string
+        if isinstance(instr, list):
+            instr = "".join(
+                p.get("text", "")
+                for p in instr
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        # Append and store back as a plain string (what Responses expects)
+        params["instructions"] = (instr + "\n" + llm.execution_instructions).strip()
 
     ## Convert output to LMC format
-
     inside_code_block = False
     accumulated_block = ""
     language = None
@@ -55,7 +107,7 @@ def run_text_llm(llm, params):
                 if language == "":
                     if llm.interpreter.os == False:
                         language = "python"
-                    elif llm.interpreter.os == False:
+                    elif llm.interpreter.os == False: # TODO: confirm if change to True
                         # OS mode does this frequently. Takes notes with markdown code blocks
                         language = "text"
                 else:
