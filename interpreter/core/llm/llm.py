@@ -282,9 +282,18 @@ Continuing...
 
         ## Start forming the request
 
+        # # Chat completions parameters
+        # params = {
+        #     "model": model,
+        #     "messages": messages,
+        #     "stream": True,
+        # }
+
+        # Responses parameters
         params = {
             "model": model,
-            "messages": messages,
+            "instructions": system_message,  # system goes here in Responses
+            "input": messages,               # your chat-style items (role/content) go here
             "stream": True,
         }
 
@@ -296,7 +305,8 @@ Continuing...
         if self.api_version:
             params["api_version"] = self.api_version
         if self.max_tokens:
-            params["max_tokens"] = self.max_tokens
+            #params["max_tokens"] = self.max_tokens # Chat completions param
+            params["max_output_tokens"] = self.max_tokens # Responses param
         if self.temperature:
             params["temperature"] = self.temperature
         if hasattr(self.interpreter, "conversation_id"):
@@ -425,6 +435,25 @@ Continuing...
             except:
                 pass
 
+def _responses_events_to_chat_deltas(events_iter):
+    """
+    Adapt Responses stream events into a simple sequence of {delta: {content: "..."}}
+    for existing handlers that expect chat.completions deltas.
+    """
+    for ev in events_iter:
+        # LiteLLM passes through the OpenAI Responses events.
+        # Text deltas:
+        if getattr(ev, "type", None) in ("response.output_text.delta", "response.output_text"):
+            # ev.delta or ev.text depending on event object – LiteLLM normalizes to attrs
+            chunk = getattr(ev, "delta", None) or getattr(ev, "text", "")
+            if chunk:
+                yield {"choices": [{"delta": {"content": chunk}}]}
+        # Tool calls (forward the raw object so your tool runner can branch on it)
+        elif getattr(ev, "type", "").startswith(("response.tool_call", "tool")):
+            yield {"tool_event": ev}
+        # Finalization:
+        elif getattr(ev, "type", "") in ("response.completed", "response.error"):
+            break
 
 def fixed_litellm_completions(**params):
     """
@@ -459,8 +488,12 @@ def fixed_litellm_completions(**params):
 
     for attempt in range(attempts):
         try:
-            yield from litellm.completion(**params)
-            return  # If the completion is successful, exit the function
+            #yield from litellm.completion(**params) # Chat completions
+            # Responses
+            events = litellm.responses(**params)
+            for delta in _responses_events_to_chat_deltas(events):
+                yield delta
+            return  # If the completion/responses is successful, exit the function
         except KeyboardInterrupt:
             print("Exiting...")
             sys.exit(0)
