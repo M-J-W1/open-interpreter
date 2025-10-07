@@ -1,3 +1,4 @@
+from builtins import print, type
 import os
 
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
@@ -146,6 +147,10 @@ class Llm:
         And then processing its output, whether it's a function or non function calling model, into LMC format.
         """
 
+        print("[run] START. model=", self.model, "supports_functions=", self.supports_functions,
+            "supports_vision=", self.supports_vision, flush=True)
+        print("[run] incoming messages (raw):", messages, flush=True)
+
         if not self._is_loaded:
             self.load()
 
@@ -208,7 +213,9 @@ class Llm:
                 self.supports_vision = False
 
         # Trim image messages if they're there
-        image_messages = [msg for msg in messages if msg["type"] == "image"]
+        #image_messages = [msg for msg in messages if msg["type"] == "image"]
+        image_messages = [msg for msg in messages if msg.get("type") == "image"]
+        print(f"[run] image_messages found: {len(image_messages)}", flush=True)
         if self.supports_vision:
             if self.interpreter.os:
                 # Keep only the last two images if the interpreter is running in OS mode
@@ -271,6 +278,10 @@ class Llm:
             shrink_images=self.interpreter.shrink_images,
             interpreter=self.interpreter,
         )
+
+        print("[run] after convert_to_openai_messages. First item type:",
+        type(messages[0]).__name__, flush=True)
+        print("[run] sample[0]:", messages[0], flush=True)
 
         system_message = messages[0]["content"]
         messages = messages[1:]
@@ -407,6 +418,26 @@ Continuing...
             #params["allowed_openai_params"] = ["reasoning_effort", "reasoning"]
             params["allowed_openai_params"] = ["reasoning_effort"]
 
+
+        # Debug print params summary
+        def _summarize_messages(msgs, n=2):
+            try:
+                return [{"role": m.get("role"), "content_type": type(m.get("content")).__name__} for m in msgs[:n]]
+            except Exception as e:
+                return f"<summarize error: {e}>"
+
+        print("[run] params summary:",
+            {
+                "model": params.get("model"),
+                "has_api_key": "api_key" in params,
+                "stream": params.get("stream"),
+                "num_input_items": len(params.get("input", [])),
+                "instructions_len": len(params.get("instructions", "")) if isinstance(params.get("instructions"), str) else "n/a",
+                "input_preview": _summarize_messages(params.get("input", []))
+            },
+            flush=True)
+        # End debug print
+
         # Set some params directly on LiteLLM
         if self.max_budget:
             litellm.max_budget = self.max_budget
@@ -525,6 +556,8 @@ def _responses_events_to_chat_deltas(events_iter):
     sent_role = False
     for ev in events_iter:
         ev_type = getattr(ev, "type", None)
+
+        print("[events] ev.type:", ev_type, flush=True) 
 
         # Emit the role once, early
         if not sent_role and ev_type and ev_type.startswith("response."):
