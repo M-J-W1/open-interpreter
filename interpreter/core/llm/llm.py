@@ -54,7 +54,8 @@ class Llm:
         self.completions = fixed_litellm_completions
 
         # Settings
-        self.model = "gpt-4o"
+        #self.model = "gpt-4o"
+        self.model = "gpt-5" # Reasoning-capable
         self.temperature = 0.0
 
         self.supports_vision = None  # Will try to auto-detect
