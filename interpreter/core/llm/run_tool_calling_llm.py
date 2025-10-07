@@ -277,11 +277,22 @@ def run_tool_calling_llm(llm, request_params):
                 continue
         # --- END NEW ---
 
-        if "choices" not in chunk or len(chunk["choices"]) == 0:
+        if "choices" not in chunk or not chunk["choices"]:
             # This happens sometimes
             continue
 
-        delta = chunk["choices"][0]["delta"]
+        choice0 = chunk["choices"][0]
+        delta = choice0.get("delta")
+
+        # Finish-only chunk from the adapter (no delta present)
+        if delta is None:
+            finish = choice0.get("finish_reason")
+            if finish == "stop":
+                break
+            if finish == "error":
+                raise RuntimeError("Model returned an error finish.")
+            # Unknown non-delta chunk; skip
+            continue
 
         # # Convert tool call into function call, which we have great parsing logic for below
         # if "tool_calls" in delta and delta["tool_calls"]:

@@ -575,10 +575,14 @@ def _responses_events_to_chat_deltas(events_iter):
     for ev in events_iter:
         ev_type = getattr(ev, "type", None)
 
-        print("[events] ev.type:", ev_type, flush=True) 
+        print("[events] ev.type:", ev_type, flush=True)
 
-        # Emit the role once, early
-        if not sent_role and ev_type and ev_type.startswith("response."):
+        # normalize to a lowercase string so we can match both styles:
+        # "response.completed" and "ResponsesAPIStreamEvents.RESPONSE_COMPLETED"
+        t = str(ev_type or "").lower()
+
+        # Emit the role once, early (unchanged)
+        if not sent_role and ev_type and (t.startswith("response.") or "response" in t):
             sent_role = True
             yield {"choices": [{"delta": {"role": "assistant"}}]}
 
@@ -587,14 +591,15 @@ def _responses_events_to_chat_deltas(events_iter):
             if chunk:
                 yield {"choices": [{"delta": {"content": chunk}}]}
         elif ev_type and ev_type.startswith(("response.tool_call", "tool")):
-            # forward tool events unchanged for your tool runner
             yield {"tool_event": ev}
-        elif ev_type == "response.completed":
-            # mirror Chat finish token
+
+        # ---- CHANGED: finish detection tolerant of enum-style names ----
+        elif (t == "response.completed") or t.endswith("response_completed"):
             yield {"choices": [{"finish_reason": "stop"}]}
             break
-        elif ev_type == "response.error":
-            # surface an error-like finish
+
+        # ---- (optional but symmetric) error detection too ----
+        elif (t == "response.error") or t.endswith("response_error"):
             yield {"choices": [{"finish_reason": "error"}]}
             break
 
