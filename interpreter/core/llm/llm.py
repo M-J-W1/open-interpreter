@@ -23,6 +23,8 @@ from .run_text_llm import run_text_llm
 from .run_tool_calling_llm import run_tool_calling_llm
 from .utils.convert_to_openai_messages import convert_to_openai_messages
 
+print("Using LiteLLM version", litellm.__version__)
+
 # Create or get the logger
 logger = logging.getLogger("LiteLLM")
 
@@ -79,30 +81,60 @@ class Llm:
     def _ensure_responses_message_shape(self, m):
         out = {"role": m.get("role", "user")}
         c = m.get("content", "")
-        # Convert Chat-style content → Responses-style typed parts
+
+        def _to_text_part(s):
+            return {"type": "text", "text": s if isinstance(s, str) else str(s)}
+
         if isinstance(c, str):
-            out["content"] = [{"type": "text", "text": c}]
+            out["content"] = [_to_text_part(c)]
         elif isinstance(c, list):
             parts = []
             for p in c:
-                t = p.get("type")
-                if t == "text" and "text" in p:
+                # 1) Plain strings inside a list
+                if isinstance(p, str):
+                    parts.append(_to_text_part(p))
+                    continue
+
+                # 2) Non-dicts → stringify
+                if not isinstance(p, dict):
+                    parts.append(_to_text_part(p))
+                    continue
+
+                # 3) Dicts: normalize common shapes
+                pt = p.get("type")
+
+                # 3a) Chat-style text without "type"
+                if pt is None and "text" in p:
                     parts.append({"type": "text", "text": p["text"]})
-                elif t == "image_url":
-                    # Chat format: {"type":"image_url","image_url":{"url": "..."}}
+                    continue
+
+                # 3b) Responses-style text
+                if pt == "text" and "text" in p:
+                    parts.append({"type": "text", "text": p["text"]})
+                    continue
+
+                # 3c) Chat-style image → Responses input_image
+                if pt == "image_url":
                     image_url = p.get("image_url", {})
-                    if isinstance(image_url, dict):
-                        url = image_url.get("url")
-                    else:
-                        url = image_url  # already a string
+                    url = image_url.get("url") if isinstance(image_url, dict) else image_url
                     if url:
                         parts.append({"type": "input_image", "image_url": url})
-                else:
-                    # Pass through already-correct parts (e.g., {"type":"input_image",...})
+                    else:
+                        parts.append(_to_text_part(""))  # fallback
+                    continue
+
+                # 3d) Already Responses-typed? (input_image, input_text, etc.)
+                if pt in {"input_image", "input_text", "input_audio", "input_video", "input_json"}:
+                    # Optionally ensure required fields exist; here we trust upstream.
                     parts.append(p)
-            out["content"] = parts if parts else [{"type":"text","text":""}]
+                    continue
+
+                # 3e) Unknown dict shape → stringify safely
+                parts.append(_to_text_part(p))
+            out["content"] = parts if parts else [_to_text_part("")]
         else:
-            out["content"] = [{"type": "text", "text": str(c)}]
+            out["content"] = [_to_text_part(c)]
+
         return out
 
     def run(self, messages):
@@ -330,6 +362,17 @@ Continuing...
 
         # Coerce each message for Responses
         messages = [self._ensure_responses_message_shape(m) for m in messages]
+
+        if isinstance(system_message, list):
+            system_message = "".join(
+                p.get("text", "")
+                for p in system_message
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        elif not isinstance(system_message, str):
+            system_message = str(system_message)
+
+        print("DEBUG first input item:", messages[0])
 
         # Responses parameters
         params = {
