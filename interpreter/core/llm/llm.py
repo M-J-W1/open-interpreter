@@ -271,6 +271,13 @@ class Llm:
                         img_msg["format"] = "description"
                         img_msg["content"] = ""
 
+
+        # normalize plain chat dicts into type='message'
+        messages = [
+            msg if "type" in msg else {**msg, "type": "message"}
+            for msg in messages
+        ]
+
         # Convert to OpenAI messages format
         messages = convert_to_openai_messages(
             messages,
