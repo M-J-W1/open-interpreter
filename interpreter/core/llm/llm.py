@@ -85,7 +85,7 @@ class Llm:
         c = m.get("content", "")
 
         def _to_text_part(s):
-            return {"type": "text", "text": s if isinstance(s, str) else str(s)}
+            return {"type": "input_text", "text": s if isinstance(s, str) else str(s)}
 
         if isinstance(c, str):
             out["content"] = [_to_text_part(c)]
@@ -107,12 +107,13 @@ class Llm:
 
                 # 3a) Chat-style text without "type"
                 if pt is None and "text" in p:
-                    parts.append({"type": "text", "text": p["text"]})
+                    parts.append({"type": "input_text", "text": p["text"]})
                     continue
 
-                # 3b) Responses-style text
-                if pt == "text" and "text" in p:
-                    parts.append({"type": "text", "text": p["text"]})
+                # 3b) Responses-style text (support legacy "text" and the correct "input_text")
+                if (pt in ("text", "input_text")) and "text" in p:
+                    # normalize to input_text
+                    parts.append({"type": "input_text", "text": p["text"]})
                     continue
 
                 # 3c) Chat-style image → Responses input_image
@@ -374,7 +375,11 @@ Continuing...
             # If trim except path re-inserted a system message, pull it back out
             sys_c = messages[0].get("content", "")
             if isinstance(sys_c, list):
-                system_message = "".join(p.get("text","") for p in sys_c if p.get("type")=="text")
+                system_message = "".join(
+                    p.get("text", "")
+                    for p in sys_c
+                    if isinstance(p, dict) and p.get("type") in ("input_text", "text")
+                )
             else:
                 system_message = sys_c
             messages = messages[1:]
@@ -386,7 +391,7 @@ Continuing...
             system_message = "".join(
                 p.get("text", "")
                 for p in system_message
-                if isinstance(p, dict) and p.get("type") == "text"
+                if isinstance(p, dict) and p.get("type") in ("input_text", "text")
             )
         elif not isinstance(system_message, str):
             system_message = str(system_message)

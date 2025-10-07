@@ -33,12 +33,12 @@ def run_text_llm(llm, params):
                 role = m.get("role", "user")
                 c = m.get("content", "")
                 if isinstance(c, str):
-                    c = [{"type": "text", "text": c}]
+                    c = [{"type": "input_text", "text": c}]
                 elif isinstance(c, list):
                     # try to keep as-is
                     pass
                 else:
-                    c = [{"type": "text", "text": str(c)}]
+                    c = [{"type": "input_text", "text": str(c)}]
                 norm.append({"role": role, "content": c})
             msgs = norm
 
@@ -59,7 +59,7 @@ def run_text_llm(llm, params):
             instr = "".join(
                 p.get("text", "")
                 for p in instr
-                if isinstance(p, dict) and p.get("type") == "text"
+                if isinstance(p, dict) and p.get("type") in ("input_text", "text")
             )
         # Append and store back as a plain string (what Responses expects)
         params["instructions"] = (instr + "\n" + llm.execution_instructions).strip()
@@ -107,7 +107,7 @@ def run_text_llm(llm, params):
                 if language == "":
                     if llm.interpreter.os == False:
                         language = "python"
-                    elif llm.interpreter.os == False: # TODO: confirm if change to True
+                    elif llm.interpreter.os == True: # Modified from "False" to "True"
                         # OS mode does this frequently. Takes notes with markdown code blocks
                         language = "text"
                 else:

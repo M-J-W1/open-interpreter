@@ -110,6 +110,7 @@ def run_tool_calling_llm(llm, request_params):
         i.name.lower() for i in llm.interpreter.computer.terminal.languages
     ]
     request_params["tools"] = [tool_schema]
+    request_params.setdefault("tool_choice", "auto")
 
     # request_params["messages"] = process_messages(request_params["messages"]) # Chat Completions ONLY
     
@@ -200,25 +201,89 @@ def run_tool_calling_llm(llm, request_params):
     buffer = ""
 
     for chunk in llm.completions(**request_params):
+
+        # --- NEW: handle Responses tool events directly ---
+        if "tool_event" in chunk:
+            ev = chunk["tool_event"]
+            # robust access for both objects and dicts
+            ev_type = getattr(ev, "type", None) or (ev.get("type") if isinstance(ev, dict) else None)
+
+            if not ev_type:
+                continue
+
+            # Start of a tool call -> capture function name
+            if ev_type.endswith(".created"):
+                item = getattr(ev, "item", None) or (ev.get("item") if isinstance(ev, dict) else None)
+                fn   = getattr(item, "function", None) or (item.get("function") if isinstance(item, dict) else None)
+                name = getattr(fn, "name", None) or (fn.get("name") if isinstance(fn, dict) else None)
+                accumulated_deltas.setdefault("function_call", {"name": None, "arguments": ""})
+                if name:
+                    accumulated_deltas["function_call"]["name"] = name
+                function_call_detected = True
+                continue
+
+            # Streaming arguments -> append to our accumulator
+            if ev_type.endswith(".delta"):
+                d = getattr(ev, "delta", None) or (ev.get("delta") if isinstance(ev, dict) else None)
+                # In Responses, the delta may contain just the new substring for `arguments`
+                args_delta = None
+                if isinstance(d, dict):
+                    args_delta = d.get("arguments")
+                else:
+                    args_delta = getattr(d, "arguments", None)
+
+                if args_delta:
+                    accumulated_deltas.setdefault("function_call", {"name": None, "arguments": ""})
+                    accumulated_deltas["function_call"]["arguments"] += args_delta
+                continue
+
+            # Completed -> nothing extra to do here
+            if ev_type.endswith(".completed"):
+                continue
+        # --- END NEW ---
+
         if "choices" not in chunk or len(chunk["choices"]) == 0:
             # This happens sometimes
             continue
 
         delta = chunk["choices"][0]["delta"]
 
-        # Convert tool call into function call, which we have great parsing logic for below
+        # # Convert tool call into function call, which we have great parsing logic for below
+        # if "tool_calls" in delta and delta["tool_calls"]:
+        #     function_call_detected = True
+            # # import pdb; pdb.set_trace()
+            # if len(delta["tool_calls"]) > 0 and delta["tool_calls"][0].function:
+            #     delta = {
+            #         # "id": delta["tool_calls"][0],
+            #         "function_call": {
+            #             "name": delta["tool_calls"][0].function.name,
+            #             "arguments": delta["tool_calls"][0].function.arguments,
+            #         }
+            #     }
+
+        # Convert Chat Completions-style tool_calls → function_call
         if "tool_calls" in delta and delta["tool_calls"]:
             function_call_detected = True
 
-            # import pdb; pdb.set_trace()
-            if len(delta["tool_calls"]) > 0 and delta["tool_calls"][0].function:
-                delta = {
-                    # "id": delta["tool_calls"][0],
-                    "function_call": {
-                        "name": delta["tool_calls"][0].function.name,
-                        "arguments": delta["tool_calls"][0].function.arguments,
-                    }
-                }
+            tc0 = delta["tool_calls"][0]
+            fn = getattr(tc0, "function", None) or (tc0.get("function") if isinstance(tc0, dict) else None)
+
+            if fn:
+                name = getattr(fn, "name", None) or (fn.get("name") if isinstance(fn, dict) else None)
+                args = getattr(fn, "arguments", None) or (fn.get("arguments") if isinstance(fn, dict) else "")
+
+                # Ensure arguments is a string for your merge_deltas + incremental parsing
+                if not isinstance(args, str):
+                    try:
+                        import json
+                        args = json.dumps(args, ensure_ascii=False)
+                    except Exception:
+                        args = str(args)
+
+                # Merge instead of replacing to avoid losing other delta keys
+                new_delta = {k: v for k, v in delta.items() if k != "tool_calls"}
+                new_delta["function_call"] = {"name": name, "arguments": args}
+                delta = new_delta
 
         # Accumulate deltas
         accumulated_deltas = merge_deltas(accumulated_deltas, delta)
