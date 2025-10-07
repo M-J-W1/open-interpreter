@@ -5,31 +5,53 @@ import re
 from .utils.merge_deltas import merge_deltas
 from .utils.parse_partial_json import parse_partial_json
 
+# # Chat Completions-style tool schema
+# tool_schema = {
+#     "type": "function",
+#     "function": {
+#         "name": "execute",
+#         "description": "Executes code on the user's machine **in the users local environment** and returns the output",
+#         "parameters": {
+#             "type": "object",
+#             "properties": {
+#                 "language": {
+#                     "type": "string",
+#                     "description": "The programming language (required parameter to the `execute` function)",
+#                     "enum": [
+#                         # This will be filled dynamically with the languages OI has access to.
+#                     ],
+#                 },
+#                 "code": {
+#                     "type": "string",
+#                     "description": "The code to execute (required)",
+#                 },
+#             },
+#             "required": ["language", "code"],
+#         },
+#     },
+# }
+
+# Responses-compliant tool schema (top-level name)
 tool_schema = {
     "type": "function",
-    "function": {
-        "name": "execute",
-        "description": "Executes code on the user's machine **in the users local environment** and returns the output",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "language": {
-                    "type": "string",
-                    "description": "The programming language (required parameter to the `execute` function)",
-                    "enum": [
-                        # This will be filled dynamically with the languages OI has access to.
-                    ],
-                },
-                "code": {
-                    "type": "string",
-                    "description": "The code to execute (required)",
-                },
+    "name": "execute",
+    "description": "Executes code on the user's machine **in the users local environment** and returns the output",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "language": {
+                "type": "string",
+                "description": "The programming language (required parameter to the `execute` function)",
+                "enum": [],  # filled dynamically below
             },
-            "required": ["language", "code"],
+            "code": {
+                "type": "string",
+                "description": "The code to execute (required)",
+            },
         },
+        "required": ["language", "code"],
     },
 }
-
 
 def process_messages(messages):
     processed_messages = []
@@ -104,13 +126,26 @@ def run_tool_calling_llm(llm, request_params):
     print("[run_tool_calling_llm] keys in request_params:", list(request_params.keys()), flush=True)
 
     ## Setup
-
+    
     # Add languages OI has access to
-    tool_schema["function"]["parameters"]["properties"]["language"]["enum"] = [
+
+    # # Chat Completions ONLY
+    # tool_schema["function"]["parameters"]["properties"]["language"]["enum"] = [
+    #     i.name.lower() for i in llm.interpreter.computer.terminal.languages
+    # ]
+
+    # Responses-style Completions
+    tool_schema["parameters"]["properties"]["language"]["enum"] = [
         i.name.lower() for i in llm.interpreter.computer.terminal.languages
     ]
-    request_params["tools"] = [tool_schema]
-    request_params.setdefault("tool_choice", "auto")
+
+    # Only include tools when the model supports functions
+    if llm.supports_functions:
+        request_params["tools"] = [tool_schema]
+        request_params.setdefault("tool_choice", "auto")
+    else:
+        request_params.pop("tools", None)
+        request_params.pop("tool_choice", None)
 
     # request_params["messages"] = process_messages(request_params["messages"]) # Chat Completions ONLY
     

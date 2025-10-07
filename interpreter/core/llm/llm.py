@@ -406,6 +406,10 @@ Continuing...
             "stream": True,
         }
 
+        def _allows_sampling_knobs(model: str) -> bool:
+            # Reasoning/Responses models typically disallow temperature/top_p/etc.
+            return not (model.startswith(("gpt-5", "o4", "o3")))
+
         # Optional inputs
         if self.api_key:
             params["api_key"] = self.api_key
@@ -415,8 +419,9 @@ Continuing...
             params["api_version"] = self.api_version
         if self.max_tokens:
             #params["max_tokens"] = self.max_tokens # Chat completions param
-            params["max_output_tokens"] = self.max_tokens # Responses param
-        if self.temperature:
+            params["max_output_tokens"] = self.max_tokens # Responses param      
+        if self.temperature is not None and _allows_sampling_knobs(model):
+            # Only add temperature if the model allows it
             params["temperature"] = self.temperature
         if hasattr(self.interpreter, "conversation_id"):
             params["conversation_id"] = self.interpreter.conversation_id
@@ -651,9 +656,9 @@ def fixed_litellm_completions(**params):
                 )
                 # So, let's try one more time with a dummy API key:
                 params["api_key"] = "x"
-            if attempt == 1:
-                # Try turning up the temperature?
-                params["temperature"] = params.get("temperature", 0.0) + 0.1
+            #if attempt == 1:
+                # # Try turning up the temperature?
+                #params["temperature"] = params.get("temperature", 0.0) + 0.1
 
     if first_error is not None:
         raise first_error  # If all attempts fail, raise the first error
