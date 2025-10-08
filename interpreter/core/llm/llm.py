@@ -570,8 +570,9 @@ def _responses_events_to_chat_deltas(events_iter):
     """Adapt Responses events to Chat-like deltas."""
     sent_role = False
     for ev in events_iter:
-        ev_type = getattr(ev, "type", None)
+        print("[events] ev:", ev, flush=True)
 
+        ev_type = getattr(ev, "type", None)
         print("[events] ev.type:", ev_type, flush=True)
 
         # normalize to a lowercase string so we can match both styles:
@@ -589,6 +590,8 @@ def _responses_events_to_chat_deltas(events_iter):
                 yield {"choices": [{"delta": {"content": chunk}}]}
         elif ev_type and ev_type.startswith(("response.tool_call", "tool")):
             yield {"tool_event": ev}
+        elif ev_type and ev_type.startswith(("response.function_call", "function")):
+            yield {"function_call": ev}
 
         # ---- CHANGED: finish detection tolerant of enum-style names ----
         elif (t == "response.completed") or t.endswith("response_completed"):
