@@ -81,11 +81,15 @@ class Llm:
         self.reasoning_effort = None  # "low" | "medium" | "high"
 
     def _ensure_responses_message_shape(self, m):
-        out = {"role": m.get("role", "user")}
+        role = m.get("role", "user")
+        out = {"role": role}
         c = m.get("content", "")
 
+        # Responses: user → input_text, assistant → output_text
+        text_type = "output_text" if role == "assistant" else "input_text"
+
         def _to_text_part(s):
-            return {"type": "input_text", "text": s if isinstance(s, str) else str(s)}
+            return {"type": text_type, "text": s if isinstance(s, str) else str(s)}
 
         if isinstance(c, str):
             out["content"] = [_to_text_part(c)]
@@ -94,46 +98,39 @@ class Llm:
             for p in c:
                 # 1) Plain strings inside a list
                 if isinstance(p, str):
-                    parts.append(_to_text_part(p))
-                    continue
+                    parts.append(_to_text_part(p)); continue
 
                 # 2) Non-dicts → stringify
                 if not isinstance(p, dict):
-                    parts.append(_to_text_part(p))
-                    continue
+                    parts.append(_to_text_part(p)); continue
 
-                # 3) Dicts: normalize common shapes
                 pt = p.get("type")
 
                 # 3a) Chat-style text without "type"
                 if pt is None and "text" in p:
-                    parts.append({"type": "input_text", "text": p["text"]})
-                    continue
+                    parts.append({"type": text_type, "text": p["text"]}); continue
 
-                # 3b) Responses-style text (support legacy "text" and the correct "input_text")
-                if (pt in ("text", "input_text")) and "text" in p:
-                    # normalize to input_text
-                    parts.append({"type": "input_text", "text": p["text"]})
-                    continue
+                # 3b) Text (normalize legacy "text", or wrong-side types)
+                if pt in ("text", "input_text", "output_text") and "text" in p:
+                    parts.append({"type": text_type, "text": p["text"]}); continue
 
-                # 3c) Chat-style image → Responses input_image
+                # 3c) Chat-style image → Responses input_image (user-only in practice)
                 if pt == "image_url":
                     image_url = p.get("image_url", {})
                     url = image_url.get("url") if isinstance(image_url, dict) else image_url
-                    if url:
-                        parts.append({"type": "input_image", "image_url": url})
-                    else:
-                        parts.append(_to_text_part(""))  # fallback
-                    continue
+                    parts.append({"type": "input_image", "image_url": url} if url else _to_text_part("")); continue
 
-                # 3d) Already Responses-typed? (input_image, input_text, etc.)
-                if pt in {"input_image", "input_text", "input_audio", "input_video", "input_json"}:
-                    # Optionally ensure required fields exist; here we trust upstream.
-                    parts.append(p)
+                # 3d) Already Responses-typed? keep, but coerce text types to correct side
+                if pt in {"input_image", "input_text", "output_text", "input_audio", "input_video", "input_json"}:
+                    if pt in ("input_text", "output_text") and pt != text_type and "text" in p:
+                        parts.append({"type": text_type, "text": p["text"]})
+                    else:
+                        parts.append(p)
                     continue
 
                 # 3e) Unknown dict shape → stringify safely
                 parts.append(_to_text_part(p))
+
             out["content"] = parts if parts else [_to_text_part("")]
         else:
             out["content"] = [_to_text_part(c)]
