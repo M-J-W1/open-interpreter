@@ -574,10 +574,24 @@ def _responses_events_to_chat_deltas(events_iter):
     func_calls = {}  # item_id -> {"name": str|None, "args": str}
 
     def _etype(ev):
-        # normalize to lowercase string (works for enum or dict)
+        """
+        Return the canonical lower-case event type string like
+        'response.output_text.delta'. Handles:
+        - Enum values (ResponsesAPIStreamEvents.*)
+        - dict payloads with a 'type' key
+        - plain strings as a last resort
+        """
         t = getattr(ev, "type", None)
-        if not t and isinstance(ev, dict):
-            t = ev.get("type")
+
+        # If it's an Enum (ResponsesAPIStreamEvents.*), prefer its .value
+        if t is not None and hasattr(t, "value"):
+            return str(t.value).lower()
+
+        # If it's a dict-shaped event
+        if isinstance(ev, dict):
+            return str(ev.get("type", "")).lower()
+
+        # Fallback: best-effort stringification
         return (str(t) if t else "").lower()
 
     def _get(obj, key, default=None):
