@@ -567,39 +567,145 @@ Continuing...
                 pass
 
 def _responses_events_to_chat_deltas(events_iter):
-    """Adapt Responses events to Chat-like deltas."""
+    """Adapt Responses events to Chat-like deltas (incl. function-call streaming)."""
     sent_role = False
+
+    # Track in-flight function calls by item_id
+    func_calls = {}  # item_id -> {"name": str|None, "args": str}
+
+    def _etype(ev):
+        # normalize to lowercase string (works for enum or dict)
+        t = getattr(ev, "type", None)
+        if not t and isinstance(ev, dict):
+            t = ev.get("type")
+        return (str(t) if t else "").lower()
+
+    def _get(obj, key, default=None):
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
     for ev in events_iter:
         print("[events] ev:", ev, flush=True)
+        t = _etype(ev)
 
-        ev_type = getattr(ev, "type", None)
-        #print("[events] ev.type:", ev_type, flush=True)
-
-        # normalize to a lowercase string so we can match both styles:
-        # "response.completed" and "ResponsesAPIStreamEvents.RESPONSE_COMPLETED"
-        t = str(ev_type or "").lower()
-
-        # Emit the role once, early (unchanged)
-        if not sent_role and ev_type and (t.startswith("response.") or "response" in t):
+        # Emit the role once at the beginning of a Responses stream
+        if not sent_role and (t.startswith("response.") or "response" in t):
             sent_role = True
             yield {"choices": [{"delta": {"role": "assistant"}}]}
 
-        if ev_type in ("response.output_text.delta", "response.output_text"):
-            chunk = getattr(ev, "delta", None) or getattr(ev, "text", "")
+        # ── Plain text streaming ──────────────────────────────────────────────────
+        if t == "response.output_text.delta":
+            chunk = _get(ev, "delta") or _get(ev, "text") or ""
             if chunk:
                 yield {"choices": [{"delta": {"content": chunk}}]}
-        elif ev_type and ev_type.startswith(("response.tool_call", "tool")):
-            yield {"tool_event": ev}
-        elif ev_type and ev_type.startswith(("response.function_call", "function")):
-            yield {"function_call": ev}
+            continue
+        if t in ("response.output_text.done", "response.content_part.done"):
+            # nothing special to convert
+            continue
 
-        # ---- CHANGED: finish detection tolerant of enum-style names ----
-        elif (t == "response.completed") or t.endswith("response_completed"):
+        # ── Function-call lifecycle (Responses schema) ───────────────────────────
+        # Start of a function_call item
+        if t == "response.output_item.added":
+            item = _get(ev, "item")
+            if _get(item, "type") == "function_call":
+                fid = _get(item, "id")
+                name = _get(item, "name")
+                if fid:
+                    func_calls[fid] = {"name": name, "args": ""}
+                    # Optionally announce start with empty args so downstream sees the name early
+                    yield {
+                        "choices": [{
+                            "delta": {
+                                "tool_calls": [{
+                                    "function": {"name": name or "execute", "arguments": ""}
+                                }]
+                            }
+                        }]
+                    }
+            continue
+
+        # Streaming JSON arguments text (append!)
+        if t == "response.function_call_arguments.delta":
+            fid = _get(ev, "item_id")
+            piece = _get(ev, "delta", "")
+            state = func_calls.setdefault(fid or "<unknown>", {"name": None, "args": ""})
+            state["args"] += piece or ""
+            yield {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "function": {
+                                "name": state["name"] or "execute",
+                                # IMPORTANT: emit the cumulative string so your merge logic can diff it
+                                "arguments": state["args"],
+                            }
+                        }]
+                    }
+                }]
+            }
+            continue
+
+        # Arguments fully available as one string
+        if t == "response.function_call_arguments.done":
+            fid = _get(ev, "item_id")
+            final_args = _get(ev, "arguments", "")
+            state = func_calls.setdefault(fid or "<unknown>", {"name": None, "args": ""})
+            # Prefer the provider's full arguments if present
+            if isinstance(final_args, str) and len(final_args) >= len(state["args"]):
+                state["args"] = final_args
+            yield {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "function": {
+                                "name": state["name"] or "execute",
+                                "arguments": state["args"],
+                            }
+                        }]
+                    }
+                }]
+            }
+            continue
+
+        # Item completion: ensure the final cumulative args are visible downstream
+        if t == "response.output_item.done":
+            item = _get(ev, "item")
+            if _get(item, "type") == "function_call":
+                fid = _get(item, "id")
+                state = func_calls.get(fid)
+                if state:
+                    yield {
+                        "choices": [{
+                            "delta": {
+                                "tool_calls": [{
+                                    "function": {
+                                        "name": state["name"] or "execute",
+                                        "arguments": state["args"],
+                                    }
+                                }]
+                            }
+                        }]
+                    }
+            continue
+
+        # ── (Optional) Fallbacks for other SDKs naming ───────────────────────────
+        # If some providers emit "response.tool_call.*" events, forward them raw.
+        if t.startswith("response.tool_call"):
+            yield {"tool_event": ev}
+            continue
+        if t.startswith("response.function_call"):
+            # Other function_call subtypes you don't explicitly map → pass through
+            yield {"function_call": ev}
+            continue
+
+        # ── Completion / error ───────────────────────────────────────────────────
+        if (t == "response.completed") or t.endswith("response_completed"):
             yield {"choices": [{"finish_reason": "stop"}]}
             break
-
-        # ---- (optional but symmetric) error detection too ----
-        elif (t == "response.error") or t.endswith("response_error"):
+        if (t == "response.error") or t.endswith("response_error"):
             yield {"choices": [{"finish_reason": "error"}]}
             break
 
