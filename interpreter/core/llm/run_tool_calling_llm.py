@@ -408,6 +408,7 @@ def run_tool_calling_llm(llm, request_params):
             and (
                 accumulated_deltas["function_call"]["name"] == "python"
                 or accumulated_deltas["function_call"]["name"] == "functions"
+                or accumulated_deltas["function_call"]["name"] == "execute"
             )
         ):
             if language is None:
