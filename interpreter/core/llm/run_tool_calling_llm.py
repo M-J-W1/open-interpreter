@@ -270,6 +270,26 @@ def run_tool_calling_llm(llm, request_params):
                 if args_delta:
                     accumulated_deltas.setdefault("function_call", {"name": None, "arguments": ""})
                     accumulated_deltas["function_call"]["arguments"] += args_delta
+
+                    # NEW: parse accumulated args and stream code deltas immediately (Responses path)
+                    args_text = accumulated_deltas["function_call"]["arguments"]
+                    args_obj = parse_partial_json(args_text) or {}
+
+                    # set language as soon as it's fully present
+                    if language is None and args_obj.get("language"):
+                        language = args_obj["language"]
+
+                    # stream incremental code pieces to the executor
+                    if "code" in args_obj:
+                        new_code = args_obj.get("code") or ""
+                        piece = new_code[len(code):]
+                        code = new_code
+                        if piece:
+                            yield {
+                                "type": "code",
+                                "format": (language or "python"),
+                                "content": piece,
+                            }
                 continue
 
             # Completed -> nothing extra to do here
