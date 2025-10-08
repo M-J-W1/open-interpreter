@@ -570,7 +570,7 @@ def _responses_events_to_chat_deltas(events_iter):
     """Adapt Responses events to Chat-like deltas."""
     sent_role = False
     for ev in events_iter:
-        #print("[events] ev:", ev, flush=True)
+        print("[events] ev:", ev, flush=True)
 
         ev_type = getattr(ev, "type", None)
         #print("[events] ev.type:", ev_type, flush=True)
