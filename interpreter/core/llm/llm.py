@@ -24,7 +24,7 @@ from .run_text_llm import run_text_llm
 from .run_tool_calling_llm import run_tool_calling_llm
 from .utils.convert_to_openai_messages import convert_to_openai_messages
 
-print("Starting llm.py")
+#print("Starting llm.py")
 
 # Create or get the logger
 logger = logging.getLogger("LiteLLM")
@@ -146,8 +146,8 @@ class Llm:
         And then processing its output, whether it's a function or non function calling model, into LMC format.
         """
 
-        print("[run] START. model=", self.model, "supports_functions=", self.supports_functions,
-            "supports_vision=", self.supports_vision, flush=True)
+        # print("[run] START. model=", self.model, "supports_functions=", self.supports_functions,
+        #     "supports_vision=", self.supports_vision, flush=True)
         #print("[run] incoming messages (raw):", messages, flush=True)
 
         if not self._is_loaded:
@@ -214,7 +214,7 @@ class Llm:
         # Trim image messages if they're there
         #image_messages = [msg for msg in messages if msg["type"] == "image"]
         image_messages = [msg for msg in messages if msg.get("type") == "image"]
-        print(f"[run] image_messages found: {len(image_messages)}", flush=True)
+        #print(f"[run] image_messages found: {len(image_messages)}", flush=True)
         if self.supports_vision:
             if self.interpreter.os:
                 # Keep only the last two images if the interpreter is running in OS mode
@@ -393,7 +393,7 @@ Continuing...
         elif not isinstance(system_message, str):
             system_message = str(system_message)
 
-        print("DEBUG first input item:", messages[0])
+        #print("DEBUG first input item:", messages[0])
 
         # Responses parameters
         params = {
@@ -434,24 +434,24 @@ Continuing...
             params["allowed_openai_params"] = ["reasoning_effort"]
 
 
-        # Debug print params summary
-        def _summarize_messages(msgs, n=2):
-            try:
-                return [{"role": m.get("role"), "content_type": type(m.get("content")).__name__} for m in msgs[:n]]
-            except Exception as e:
-                return f"<summarize error: {e}>"
+        # # Debug print params summary
+        # def _summarize_messages(msgs, n=2):
+        #     try:
+        #         return [{"role": m.get("role"), "content_type": type(m.get("content")).__name__} for m in msgs[:n]]
+        #     except Exception as e:
+        #         return f"<summarize error: {e}>"
 
-        print("[run] params summary:",
-            {
-                "model": params.get("model"),
-                "has_api_key": "api_key" in params,
-                "stream": params.get("stream"),
-                "num_input_items": len(params.get("input", [])),
-                "instructions_len": len(params.get("instructions", "")) if isinstance(params.get("instructions"), str) else "n/a",
-                "input_preview": _summarize_messages(params.get("input", []))
-            },
-            flush=True)
-        # End debug print
+        # print("[run] params summary:",
+        #     {
+        #         "model": params.get("model"),
+        #         "has_api_key": "api_key" in params,
+        #         "stream": params.get("stream"),
+        #         "num_input_items": len(params.get("input", [])),
+        #         "instructions_len": len(params.get("instructions", "")) if isinstance(params.get("instructions"), str) else "n/a",
+        #         "input_preview": _summarize_messages(params.get("input", []))
+        #     },
+        #     flush=True)
+        # # End debug print
 
         # Set some params directly on LiteLLM
         if self.max_budget:
@@ -570,10 +570,10 @@ def _responses_events_to_chat_deltas(events_iter):
     """Adapt Responses events to Chat-like deltas."""
     sent_role = False
     for ev in events_iter:
-        print("[events] ev:", ev, flush=True)
+        #print("[events] ev:", ev, flush=True)
 
         ev_type = getattr(ev, "type", None)
-        print("[events] ev.type:", ev_type, flush=True)
+        #print("[events] ev.type:", ev_type, flush=True)
 
         # normalize to a lowercase string so we can match both styles:
         # "response.completed" and "ResponsesAPIStreamEvents.RESPONSE_COMPLETED"
@@ -641,6 +641,7 @@ def fixed_litellm_completions(**params):
             print("[responses] calling litellm.responses with keys:",
                 list(params.keys()), flush=True)
             events = litellm.responses(**params)
+            print("[responses] received events:", events, flush=True)
             for delta in _responses_events_to_chat_deltas(events):
                 yield delta
             return  # If the completion/responses is successful, exit the function

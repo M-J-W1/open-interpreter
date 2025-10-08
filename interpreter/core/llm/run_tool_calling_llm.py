@@ -61,7 +61,7 @@ def process_messages(messages):
     while i < len(messages):
         message = messages[i]
 
-        print(message)
+        #print(message)
 
         if message.get("function_call"):
             last_tool_id += 1
@@ -125,7 +125,7 @@ def process_messages(messages):
 
 def run_tool_calling_llm(llm, request_params):
     
-    print("[run_tool_calling_llm] keys in request_params:", list(request_params.keys()), flush=True)
+    #print("[run_tool_calling_llm] keys in request_params:", list(request_params.keys()), flush=True)
 
     ## Setup
     
@@ -239,7 +239,7 @@ def run_tool_calling_llm(llm, request_params):
 
     for chunk in llm.completions(**request_params):
 
-        print(chunk)
+        #print(chunk)
         
         # --- NEW: handle Responses tool events directly ---
         if "tool_event" in chunk:
