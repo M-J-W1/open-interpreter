@@ -602,7 +602,7 @@ def _responses_events_to_chat_deltas(events_iter):
         return getattr(obj, key, default)
 
     for ev in events_iter:
-        print("[events] ev:", ev, flush=True)
+        #print("[events] ev:", ev, flush=True)
         t = _etype(ev)
 
         # Emit the role once at the beginning of a Responses stream

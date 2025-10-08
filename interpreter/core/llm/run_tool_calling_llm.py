@@ -239,7 +239,7 @@ def run_tool_calling_llm(llm, request_params):
 
     for chunk in llm.completions(**request_params):
 
-        #print(chunk)
+        print("chunk in llm.completions:", chunk)
         
         # --- NEW: handle Responses tool events directly ---
         if "tool_event" in chunk:
