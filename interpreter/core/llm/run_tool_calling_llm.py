@@ -408,62 +408,29 @@ def run_tool_calling_llm(llm, request_params):
 
         if (
             accumulated_deltas.get("function_call")
-            and "name" in accumulated_deltas["function_call"]
-            and (
-                accumulated_deltas["function_call"]["name"] == "python"
-                or accumulated_deltas["function_call"]["name"] == "functions"
-                or accumulated_deltas["function_call"]["name"] == "execute"
-            )
-        ):
-            if language is None:
-                language = "python"
-
-            # Pull the code string straight out of the "arguments" string
-            code_delta = accumulated_deltas["function_call"]["arguments"][len(code) :]
-            # Update the code
-            code = accumulated_deltas["function_call"]["arguments"]
-            # Yield the delta
-            if code_delta:
-                yield {
-                    "type": "code",
-                    "format": language,
-                    "content": code_delta,
-                }
-
-        if (
-            accumulated_deltas.get("function_call")
             and "arguments" in accumulated_deltas["function_call"]
             and accumulated_deltas["function_call"]["arguments"]
         ):
-            if "arguments" in accumulated_deltas["function_call"]:
-                arguments = accumulated_deltas["function_call"]["arguments"]
-                arguments = parse_partial_json(arguments)
+            arguments_text = accumulated_deltas["function_call"]["arguments"]
+            arguments = parse_partial_json(arguments_text)
 
-                if arguments:
-                    if (
-                        language is None
-                        and "language" in arguments
-                        and "code"
-                        in arguments  # <- This ensures we're *finished* typing language, as opposed to partially done
-                        and arguments["language"]
-                    ):
-                        language = arguments["language"]
+            if arguments and "code" in arguments:
+                # Set language as soon as we can; fall back to python if omitted
+                if language is None:
+                    language = arguments.get("language") or "python"
 
-                    if language is not None and "code" in arguments:
-                        # Calculate the delta (new characters only)
-                        code_delta = arguments["code"][len(code) :]
-                        # Update the code
-                        code = arguments["code"]
-                        # Yield the delta
-                        if code_delta:
-                            yield {
-                                "type": "code",
-                                "format": language,
-                                "content": code_delta,
-                            }
-                else:
-                    if llm.interpreter.verbose:
-                        print("Arguments not a dict.")
+                # Stream only the actual code, not the raw JSON
+                code_delta = arguments["code"][len(code):]
+                code = arguments["code"]
+                if code_delta:
+                    yield {
+                        "type": "code",
+                        "format": language,
+                        "content": code_delta,
+                    }
+            else:
+                if llm.interpreter.verbose:
+                    print("Arguments not a dict or no 'code' yet.")
 
     if os.getenv("INTERPRETER_REQUIRE_AUTHENTICATION", "False").lower() == "true":
         print("function_call_detected", function_call_detected)
