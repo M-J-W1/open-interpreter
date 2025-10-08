@@ -61,6 +61,8 @@ def process_messages(messages):
     while i < len(messages):
         message = messages[i]
 
+        print(message)
+
         if message.get("function_call"):
             last_tool_id += 1
             tool_id = f"toolu_{last_tool_id}"
