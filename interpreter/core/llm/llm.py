@@ -80,7 +80,7 @@ class Llm:
         # Reasoning effort passthrough (providers that support it: e.g., OpenAI o4)
         self.reasoning_effort = None  # "low" | "medium" | "high"
 
-    def _ensure_responses_message_shape(m):
+    def _ensure_responses_message_shape(self, m):
         """
         Coerce a chat-like message into a valid Responses input item:
         - structure: { role: ..., content: [ {type, ...}, ... ] }
@@ -121,10 +121,7 @@ class Llm:
                     continue
 
                 # Allow supported non-text parts through (e.g., input_image)
-                if pt in {
-                    "input_image", "input_audio", "input_video", "input_json",
-                    # If you later add output_* parts, gate them here intentionally.
-                }:
+                if pt in {"input_image", "input_audio", "input_video", "input_json"}:
                     parts.append(p)
                     continue
 
