@@ -20,9 +20,10 @@ import tokentrim as tt
 
 from .run_text_llm import run_text_llm
 
-# from .run_function_calling_llm import run_function_calling_llm
+# from .run_function_calling_llm import run_function_calling_llm (UNUSED)
 from .run_tool_calling_llm import run_tool_calling_llm
-from .utils.convert_to_openai_messages import convert_to_openai_messages
+#from .utils.convert_to_openai_messages import convert_to_openai_messages
+from .utils.convert_to_openai_responses_messages import convert_to_openai_responses_messages # Responses
 
 #print("Starting llm.py")
 
@@ -267,128 +268,90 @@ class Llm:
                         img_msg["content"] = ""
 
 
-        # normalize plain chat dicts into type='message'
-        messages = [
-            msg if "type" in msg else {**msg, "type": "message"}
-            for msg in messages
-        ]
+        # --- normalize + trim (text) BEFORE Responses conversion ----------------------
+        # Ensure every item has a 'type'
+        messages = [msg if "type" in msg else {**msg, "type": "message"} for msg in messages]
 
-        # Convert to OpenAI messages format
-        messages = convert_to_openai_messages(
-            messages,
-            function_calling=self.supports_functions,
-            vision=self.supports_vision,
-            shrink_images=self.interpreter.shrink_images,
-            interpreter=self.interpreter,
-        )
+        # 1) Pull out the system message (string) for trimming.
+        assert messages and messages[0].get("role") == "system", "First message must be system"
+        raw_system_message = messages[0].get("content", "") or ""
+        if not isinstance(raw_system_message, str):
+            raw_system_message = str(raw_system_message)
 
-        #print("[run] after convert_to_openai_messages. First item type:",
-        #type(messages[0]).__name__, flush=True)
-        #print("[run] sample[0]:", messages[0], flush=True)
+        # 2) Split the rest into text-vs-nontext so tokentrim only sees text.
+        text_msgs = [m for m in messages[1:] if m.get("type") == "message"]
+        other_msgs = [m for m in messages[1:] if m.get("type") != "message"]
 
-        system_message = messages[0]["content"]
-        messages = messages[1:]
-
-        # Trim messages
+        # 3) Run tokentrim on text-only messages.
         try:
             if self.context_window and self.max_tokens:
-                trim_to_be_this_many_tokens = (
-                    self.context_window - self.max_tokens - 25
-                )  # arbitrary buffer
-                messages = tt.trim(
-                    messages,
-                    system_message=system_message,
-                    max_tokens=trim_to_be_this_many_tokens,
+                trim_to = self.context_window - self.max_tokens - 25  # small buffer
+                trimmed_text = tt.trim(
+                    text_msgs,
+                    system_message=raw_system_message,
+                    max_tokens=trim_to,
                 )
             elif self.context_window and not self.max_tokens:
-                # Just trim to the context window if max_tokens not set
-                messages = tt.trim(
-                    messages,
-                    system_message=system_message,
+                trimmed_text = tt.trim(
+                    text_msgs,
+                    system_message=raw_system_message,
                     max_tokens=self.context_window,
                 )
             else:
                 try:
-                    messages = tt.trim(
-                        messages, system_message=system_message, model=model
+                    trimmed_text = tt.trim(
+                        text_msgs, system_message=raw_system_message, model=model
                     )
                 except:
-                    if len(messages) == 1:
-                        if self.interpreter.in_terminal_interface:
-                            self.interpreter.display_message(
-                                """
-**We were unable to determine the context window of this model.** Defaulting to 8000.
-
-If your model can handle more, run `interpreter --context_window {token limit} --max_tokens {max tokens per response}`.
-
-Continuing...
-                            """
-                            )
-                        else:
-                            self.interpreter.display_message(
-                                """
-**We were unable to determine the context window of this model.** Defaulting to 8000.
-
-If your model can handle more, run `self.context_window = {token limit}`.
-
-Also please set `self.max_tokens = {max tokens per response}`.
-
-Continuing...
-                            """
-                            )
-                    messages = tt.trim(
-                        messages, system_message=system_message, max_tokens=8000
+                    trimmed_text = tt.trim(
+                        text_msgs, system_message=raw_system_message, max_tokens=8000
                     )
-        except:
-            # If we're trimming messages, this won't work.
-            # If we're trimming from a model we don't know, this won't work.
-            # Better not to fail until `messages` is too big, just for frustrations sake, I suppose.
+        except Exception:
+            # If trimming fails for any reason, just keep the original text messages
+            trimmed_text = text_msgs
 
-            # Reunite system message with messages
-            messages = [{"role": "system", "content": system_message}] + messages
-
-            pass
-
-        # If there should be a system message, there should be a system message!
-        # Empty system messages appear to be deleted :(
-        if system_message == "":
-            if messages[0]["role"] != "system":
-                messages = [{"role": "system", "content": system_message}] + messages
-
-        ## Start forming the request
-
-        # # Chat completions parameters
-        # params = {
-        #     "model": model,
-        #     "messages": messages,
-        #     "stream": True,
-        # }
-
-        # Guarantee no duplicate system item when using `instructions`
-        if messages and messages[0].get("role") == "system":
-            # If trim except path re-inserted a system message, pull it back out
-            sys_c = messages[0].get("content", "")
-            if isinstance(sys_c, list):
-                system_message = "".join(
-                    p.get("text", "")
-                    for p in sys_c
-                    if isinstance(p, dict) and p.get("type") in ("input_text", "text")
-                )
+        # 4) Merge back non-text messages in original order.
+        # tokentrim only drops whole text messages; it doesn’t rewrite text content,
+        # so we can match on (role, content) safely.
+        trim_set = {(m.get("role"), m.get("content", "")) for m in trimmed_text}
+        merged_msgs = []
+        for m in messages[1:]:
+            if m.get("type") != "message":
+                merged_msgs.append(m)
             else:
-                system_message = sys_c
+                if (m.get("role"), m.get("content", "")) in trim_set:
+                    merged_msgs.append(m)
+
+        # 5) Rebuild a linear list with the system back at the front (still plain, not parts).
+        messages_for_conversion = (
+            [{"role": "system", "type": "message", "content": raw_system_message}] + merged_msgs
+        )
+
+        # 6) Convert to Responses-style items (images -> input_image data URLs, etc.)
+        messages = convert_to_openai_responses_messages(
+            messages_for_conversion,
+            shrink_images=self.interpreter.shrink_images,
+            interpreter=self.interpreter,
+        )
+
+        # 7) Pop system into Responses 'instructions' (string), keep the rest as input items.
+        instructions_parts = []
+        if messages and messages[0].get("role") == "system":
+            instructions_parts = messages[0].get("content", [])
             messages = messages[1:]
 
-        # Coerce each message for Responses
-        messages = [self._ensure_responses_message_shape(m) for m in messages]
-
-        if isinstance(system_message, list):
-            system_message = "".join(
+        def _parts_to_text(parts):
+            return "".join(
                 p.get("text", "")
-                for p in system_message
-                if isinstance(p, dict) and p.get("type") in ("input_text", "text")
+                for p in (parts or [])
+                if isinstance(p, dict) and p.get("type") in ("input_text", "output_text", "text")
             )
-        elif not isinstance(system_message, str):
-            system_message = str(system_message)
+
+        system_message = _parts_to_text(instructions_parts)
+
+        # 8) Final safety normalize (no tool_calls/function_call fields, correct part types).
+        messages = [self._ensure_responses_message_shape(m) for m in messages]
+        # --- end: normalize + trim + convert -----------------------------------------
 
         #print("DEBUG first input item:", messages[0])
 
@@ -420,15 +383,13 @@ Continuing...
         if hasattr(self.interpreter, "conversation_id"):
             params["conversation_id"] = self.interpreter.conversation_id
 
-        # Forward reasoning effort if set
+        # Forward reasoning effort (Responses API expects `reasoning={"effort": ...}`)
         if self.reasoning_effort:
-            # OpenAI-compatible shape (e.g., o4)
-            #params["reasoning"] = {"effort": self.reasoning_effort}
-            # LiteLLM also accepts flat 'reasoning_effort' for some routes
-            params["reasoning_effort"] = self.reasoning_effort
-            # Tell LiteLLM it's allowed to forward these to OpenAI
-            #params["allowed_openai_params"] = ["reasoning_effort", "reasoning"]
-            params["allowed_openai_params"] = ["reasoning_effort"]
+            # If you used old values like "low"/"high", just set self.reasoning_effort
+            # to the new ones you want (e.g., "minimal", "medium", "intense") before calling run().
+            params["reasoning"] = {"effort": self.reasoning_effort}
+            # Ensure LiteLLM forwards the `reasoning` object
+            params["allowed_openai_params"] = ["reasoning"]
 
 
         # # Debug print params summary
