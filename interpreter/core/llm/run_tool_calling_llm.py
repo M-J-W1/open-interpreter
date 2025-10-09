@@ -57,45 +57,74 @@ def process_messages(messages):
     processed_messages = []
     last_tool_id = 0
 
+    # Detect if we're already in Responses shape (content is a list of parts)
+    def _is_responses_item(m):
+        c = m.get("content")
+        return isinstance(c, list) and (len(c) == 0 or isinstance(c[0], dict))
+
+    responses_mode = False
+    for _m in messages:
+        if isinstance(_m, dict) and _is_responses_item(_m):
+            responses_mode = True
+            break
+
+    def _empty_content_for_role(role: str):
+        """
+        Always return a content payload valid for the shape we're sending.
+        - For Responses: list of parts with output_text/input_text
+        - For legacy chat: empty string (will be normalized upstream)
+        """
+        if responses_mode:
+            # Assistant must use output_text; others (user/tool/function) -> input_text
+            part_type = "output_text" if role == "assistant" else "input_text"
+            return [{"type": part_type, "text": ""}]
+        else:
+            return ""
+
     i = 0
     while i < len(messages):
         message = messages[i]
 
-        #print(message)
-
+        # --- Chat Completions-style "assistant" with function_call present ---
         if message.get("function_call"):
             last_tool_id += 1
             tool_id = f"toolu_{last_tool_id}"
 
-            # Convert function_call to tool_calls
+            # Convert function_call to tool_calls on the assistant message
             function = message.pop("function_call")
-            message["tool_calls"] = [
-                {"id": tool_id, "type": "function", "function": function}
-            ]
+            # Ensure assistant message has content (Responses requires it)
+            if "content" not in message:
+                message["content"] = _empty_content_for_role("assistant")
+            message.setdefault("tool_calls", [])
+            message["tool_calls"].append({"id": tool_id, "type": "function", "function": function})
             processed_messages.append(message)
 
-            # Process the next message if it's a function response
+            # If the next message is a function response, convert to tool
             if i + 1 < len(messages) and messages[i + 1].get("role") == "function":
                 next_message = messages[i + 1].copy()
                 next_message["role"] = "tool"
                 next_message["tool_call_id"] = tool_id
+                # Make sure content exists
+                if "content" not in next_message:
+                    next_message["content"] = _empty_content_for_role("tool")
                 processed_messages.append(next_message)
                 i += 1  # Skip the next message as we've already processed it
             else:
-                # Add an empty tool response if there isn't one
+                # Insert an empty tool response placeholder if one isn't there
                 processed_messages.append(
-                    {"role": "tool", "tool_call_id": tool_id, "content": ""}
+                    {"role": "tool", "tool_call_id": tool_id, "content": _empty_content_for_role("tool")}
                 )
 
+        # --- Orphaned function response (tool output without the preceding call) ---
         elif message.get("role") == "function":
-            # This handles orphaned function responses
             last_tool_id += 1
             tool_id = f"toolu_{last_tool_id}"
 
-            # Add a tool call before this orphaned tool response
+            # Add an assistant stub with tool_calls (must include content for Responses)
             processed_messages.append(
                 {
                     "role": "assistant",
+                    "content": _empty_content_for_role("assistant"),
                     "tool_calls": [
                         {
                             "id": tool_id,
@@ -109,13 +138,20 @@ def process_messages(messages):
                 }
             )
 
-            # Process the function response
+            # Convert this function response into a tool message
+            message = message.copy()
             message["role"] = "tool"
             message["tool_call_id"] = tool_id
+            if "content" not in message:
+                message["content"] = _empty_content_for_role("tool")
             processed_messages.append(message)
 
         else:
-            # For non-tool-related messages, just add them as is
+            # Pass-through (but don't drop content if it's missing in odd inputs)
+            if "content" not in message:
+                # Be conservative: give it an empty content of the correct shape
+                role = message.get("role", "user")
+                message = {**message, "content": _empty_content_for_role(role)}
             processed_messages.append(message)
 
         i += 1
