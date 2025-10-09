@@ -83,19 +83,23 @@ class Llm:
     def _ensure_responses_message_shape(self, m):
         """
         Coerce a chat-like message into a valid Responses input item:
-        - structure: { role: ..., content: [ {type, ...}, ... ] }
-        - text parts use input_text (user/tool/other) or output_text (assistant)
-        - strip Chat Completions-only keys: tool_calls, function_call, tool_call_id, name (from role=function)
+        - { role: one of user/assistant/system/developer, content: [parts...] }
+        - Text parts use input_text (non-assistant) or output_text (assistant)
+        - Strip Chat Completions-only fields
+        - Map legacy roles ('tool', 'function') to 'user'
         """
-        # --- hard strip of Chat Completions metadata (invalid in Responses input items)
-        for forbidden in ("tool_calls", "function_call", "tool_call_id", "name"):
-            if forbidden in m:
-                m.pop(forbidden, None)
+        # Remove Chat Completions-only baggage
+        for k in ("tool_calls", "function_call", "tool_call_id", "name"):
+            if k in m:
+                m.pop(k, None)
 
         role = m.get("role", "user")
-        out = {"role": role}
+        if role in ("tool", "function"):           # ❗ Responses doesn't accept these
+            role = "user"
+        if role not in ("user", "assistant", "system", "developer"):
+            role = "user"
 
-        # Choose correct text part type by role
+        out = {"role": role}
         text_type = "output_text" if role == "assistant" else "input_text"
 
         def _to_text_part(s):
@@ -103,40 +107,31 @@ class Llm:
 
         c = m.get("content", "")
 
-        # If already a Responses parts list, normalize text part types + keep supported parts
+        # Already parts? normalize text parts and allow known non-text types
         if isinstance(c, list):
             parts = []
             for p in c:
                 if isinstance(p, str):
-                    parts.append(_to_text_part(p))
-                    continue
+                    parts.append(_to_text_part(p)); continue
                 if not isinstance(p, dict):
-                    parts.append(_to_text_part(p))
-                    continue
+                    parts.append(_to_text_part(p)); continue
 
                 pt = p.get("type")
-                # Normalize any text type to the correct side
                 if pt in ("text", "input_text", "output_text") and "text" in p:
-                    parts.append({"type": text_type, "text": p["text"]})
-                    continue
+                    parts.append({"type": text_type, "text": p["text"]}); continue
 
-                # Allow supported non-text parts through (e.g., input_image)
                 if pt in {"input_image", "input_audio", "input_video", "input_json"}:
-                    parts.append(p)
-                    continue
+                    parts.append(p); continue
 
-                # Unknown dict: stringify safely
                 parts.append(_to_text_part(p))
             out["content"] = parts if parts else [_to_text_part("")]
             return out
 
-        # If content is a plain string / other scalar
+        # Plain string or other scalar
         if isinstance(c, str):
             out["content"] = [_to_text_part(c)]
-            return out
-
-        # Any other odd shape -> stringify
-        out["content"] = [_to_text_part(c)]
+        else:
+            out["content"] = [_to_text_part(c)]
         return out
 
     def run(self, messages):

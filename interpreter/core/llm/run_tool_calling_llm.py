@@ -29,19 +29,19 @@ tool_schema = {
 
 def process_messages(messages):
     """
-    Normalize an incoming conversation history for the chosen API route.
+    Normalize conversation for the chosen API route.
 
     For Responses:
-      - Each item -> {role, content=[{type: input_text/output_text, text: ...}, ...]}
-      - Strip Chat Completions metadata: tool_calls, function_call, tool_call_id, name
-      - Never synthesize assistant items with tool_calls
+      - Each item -> {role, content=[{type: input_text/output_text, text: ...}]}
+      - Strip Chat Completions metadata
+      - Map any role 'tool'/'function' to 'user'
+      - Do NOT synthesize assistant items with tool_calls
     For legacy Chat Completions:
-      - Pass through, but ensure content exists (string) so upstream conversion can handle it
+      - Keep previous behavior (tool_calls etc.)
     """
     processed = []
     last_tool_id = 0
 
-    # Detect if we're already in Responses shape (content is list of parts)
     def _is_responses_item(m):
         c = m.get("content")
         return isinstance(c, list) and (len(c) == 0 or isinstance(c[0], dict))
@@ -71,28 +71,29 @@ def process_messages(messages):
     while i < len(messages):
         msg = messages[i]
         msg = msg.copy() if isinstance(msg, dict) else {"role": "user", "content": str(msg)}
-
-        # Ensure presence of role/content
         role = msg.get("role", "user")
+
         if "content" not in msg:
             msg["content"] = _empty_content_for_role(role)
 
         if responses_mode:
             # STRICT Responses normalization
             msg = _strip_chat_completions_metadata(msg)
+
+            # Map legacy roles to 'user'
+            role = msg.get("role", "user")
+            if role in ("tool", "function"):
+                role = "user"
+            if role not in ("user", "assistant", "system", "developer"):
+                role = "user"
+            msg["role"] = role
+
             msg["content"] = _force_parts_list(role, msg.get("content", ""))
-
-            # If legacy function messages show up, treat them as tool output (content already normalized)
-            if role == "function":
-                msg["role"] = "tool"
-                msg = _strip_chat_completions_metadata(msg)
-
             processed.append(msg)
             i += 1
             continue
 
-        # ----- Legacy Chat Completions compatibility path -----
-        # Convert function_call → tool_calls on assistant (legacy; upstream may still use this)
+        # ----- Legacy Chat Completions path (unchanged) -----
         if msg.get("function_call"):
             last_tool_id += 1
             tool_id = f"toolu_{last_tool_id}"
@@ -111,12 +112,11 @@ def process_messages(messages):
                 if "content" not in next_msg:
                     next_msg["content"] = ""
                 processed.append(next_msg)
-                i += 1  # skip consumed
+                i += 1
             else:
                 processed.append({"role": "tool", "tool_call_id": tool_id, "content": ""})
 
         elif msg.get("role") == "function":
-            # Orphaned function response (legacy)
             last_tool_id += 1
             tool_id = f"toolu_{last_tool_id}"
 
@@ -138,7 +138,6 @@ def process_messages(messages):
             processed.append(msg)
 
         else:
-            # Plain pass-through for legacy
             if "content" not in msg:
                 msg["content"] = ""
             processed.append(msg)
