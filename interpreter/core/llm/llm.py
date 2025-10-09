@@ -80,61 +80,66 @@ class Llm:
         # Reasoning effort passthrough (providers that support it: e.g., OpenAI o4)
         self.reasoning_effort = None  # "low" | "medium" | "high"
 
-    def _ensure_responses_message_shape(self, m):
+    def _ensure_responses_message_shape(m):
+        """
+        Coerce a chat-like message into a valid Responses input item:
+        - structure: { role: ..., content: [ {type, ...}, ... ] }
+        - text parts use input_text (user/tool/other) or output_text (assistant)
+        - strip Chat Completions-only keys: tool_calls, function_call, tool_call_id, name (from role=function)
+        """
+        # --- hard strip of Chat Completions metadata (invalid in Responses input items)
+        for forbidden in ("tool_calls", "function_call", "tool_call_id", "name"):
+            if forbidden in m:
+                m.pop(forbidden, None)
+
         role = m.get("role", "user")
         out = {"role": role}
-        c = m.get("content", "")
 
-        # Responses: user → input_text, assistant → output_text
+        # Choose correct text part type by role
         text_type = "output_text" if role == "assistant" else "input_text"
 
         def _to_text_part(s):
             return {"type": text_type, "text": s if isinstance(s, str) else str(s)}
 
-        if isinstance(c, str):
-            out["content"] = [_to_text_part(c)]
-        elif isinstance(c, list):
+        c = m.get("content", "")
+
+        # If already a Responses parts list, normalize text part types + keep supported parts
+        if isinstance(c, list):
             parts = []
             for p in c:
-                # 1) Plain strings inside a list
                 if isinstance(p, str):
-                    parts.append(_to_text_part(p)); continue
-
-                # 2) Non-dicts → stringify
+                    parts.append(_to_text_part(p))
+                    continue
                 if not isinstance(p, dict):
-                    parts.append(_to_text_part(p)); continue
-
-                pt = p.get("type")
-
-                # 3a) Chat-style text without "type"
-                if pt is None and "text" in p:
-                    parts.append({"type": text_type, "text": p["text"]}); continue
-
-                # 3b) Text (normalize legacy "text", or wrong-side types)
-                if pt in ("text", "input_text", "output_text") and "text" in p:
-                    parts.append({"type": text_type, "text": p["text"]}); continue
-
-                # 3c) Chat-style image → Responses input_image (user-only in practice)
-                if pt == "image_url":
-                    image_url = p.get("image_url", {})
-                    url = image_url.get("url") if isinstance(image_url, dict) else image_url
-                    parts.append({"type": "input_image", "image_url": url} if url else _to_text_part("")); continue
-
-                # 3d) Already Responses-typed? keep, but coerce text types to correct side
-                if pt in {"input_image", "input_text", "output_text", "input_audio", "input_video", "input_json"}:
-                    if pt in ("input_text", "output_text") and pt != text_type and "text" in p:
-                        parts.append({"type": text_type, "text": p["text"]})
-                    else:
-                        parts.append(p)
+                    parts.append(_to_text_part(p))
                     continue
 
-                # 3e) Unknown dict shape → stringify safely
+                pt = p.get("type")
+                # Normalize any text type to the correct side
+                if pt in ("text", "input_text", "output_text") and "text" in p:
+                    parts.append({"type": text_type, "text": p["text"]})
+                    continue
+
+                # Allow supported non-text parts through (e.g., input_image)
+                if pt in {
+                    "input_image", "input_audio", "input_video", "input_json",
+                    # If you later add output_* parts, gate them here intentionally.
+                }:
+                    parts.append(p)
+                    continue
+
+                # Unknown dict: stringify safely
                 parts.append(_to_text_part(p))
-
             out["content"] = parts if parts else [_to_text_part("")]
-        else:
-            out["content"] = [_to_text_part(c)]
+            return out
 
+        # If content is a plain string / other scalar
+        if isinstance(c, str):
+            out["content"] = [_to_text_part(c)]
+            return out
+
+        # Any other odd shape -> stringify
+        out["content"] = [_to_text_part(c)]
         return out
 
     def run(self, messages):
@@ -682,66 +687,62 @@ def _responses_events_to_chat_deltas(events_iter):
 
 def fixed_litellm_completions(**params):
     """
-    Just uses a dummy API key, since we use litellm without an API key sometimes.
-    Hopefully they will fix this!
+    LiteLLM wrapper for both Chat Completions (old) and Responses (new).
+    This version includes a small validator for Responses input items and
+    never leaks Chat Completions-only fields into Responses.
     """
-
-    if "local" in params.get("model"):
-        # Kinda hacky, but this helps sometimes
+    if "local" in params.get("model", ""):
         params["stop"] = ["<|assistant|>", "<|end|>", "<|eot_id|>"]
 
     if params.get("model") == "i" and "conversation_id" in params:
-        litellm.drop_params = (
-            False  # If we don't do this, litellm will drop this param!
-        )
-        # preserve custom params for hosted 'i' model (needs conversation_id)
         litellm.drop_params = False
-    #elif any(k in params for k in ("reasoning_effort", "reasoning")):
-    #elif any(k in params for k in ("reasoning_effort",)):
-        # keep custom reasoning-related params
-        #litellm.drop_params = False
     else:
         litellm.drop_params = True
 
     params["model"] = params["model"].replace(":latest", "")
+    params["num_retries"] = 0
 
-    # Run completion
+    # --- DEBUG/SAFETY: validate Responses shape before calling
+    def _validate_responses_input(items):
+        for idx, it in enumerate(items or []):
+            c = it.get("content")
+            if not isinstance(c, list):
+                print(f"[VALIDATE] input[{idx}] content must be a list; got: {type(c).__name__}")
+            bad = [k for k in ("tool_calls", "function_call", "tool_call_id") if k in it]
+            if bad:
+                print(f"[VALIDATE] input[{idx}] has forbidden keys: {bad}")
+
     attempts = 4
     first_error = None
 
-    params["num_retries"] = 0
-
     for attempt in range(attempts):
         try:
-            #yield from litellm.completion(**params) # Chat completions
-            # Responses
-            print("[responses] calling litellm.responses with keys:",
-                list(params.keys()), flush=True)
-            events = litellm.responses(**params)
-            print("[responses] received events:", events, flush=True)
-            for delta in _responses_events_to_chat_deltas(events):
-                yield delta
-            return  # If the completion/responses is successful, exit the function
+            if "input" in params and isinstance(params["input"], list):
+                _validate_responses_input(params["input"])
+
+            # Responses path
+            if "input" in params or "instructions" in params:
+                print("[responses] calling litellm.responses with keys:",
+                      list(params.keys()), flush=True)
+                events = litellm.responses(**params)
+                print("[responses] received events:", events, flush=True)
+                for delta in _responses_events_to_chat_deltas(events):
+                    yield delta
+            else:
+                # Chat Completions path (legacy)
+                yield from litellm.completion(**params)
+
+            return
         except KeyboardInterrupt:
             print("Exiting...")
             sys.exit(0)
         except Exception as e:
             print(f"[responses attempt {attempt}] exception: {type(e).__name__}: {e}", flush=True)
             if attempt == 0:
-                # Store the first error
                 first_error = e
-            if (
-                isinstance(e, litellm.exceptions.AuthenticationError)
-                and "api_key" not in params
-            ):
-                print(
-                    "LiteLLM requires an API key. Trying again with a dummy API key. In the future, if this fixes it, please set a dummy API key to prevent this message. (e.g `interpreter --api_key x` or `self.api_key = 'x'`)"
-                )
-                # So, let's try one more time with a dummy API key:
+            if isinstance(e, litellm.exceptions.AuthenticationError) and "api_key" not in params:
+                print("LiteLLM requires an API key. Retrying with a dummy key.")
                 params["api_key"] = "x"
-            #if attempt == 1:
-                # # Try turning up the temperature?
-                #params["temperature"] = params.get("temperature", 0.0) + 0.1
 
     if first_error is not None:
-        raise first_error  # If all attempts fail, raise the first error
+        raise first_error
