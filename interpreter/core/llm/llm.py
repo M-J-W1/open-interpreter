@@ -576,23 +576,14 @@ def _responses_events_to_chat_deltas(events_iter):
     def _etype(ev):
         """
         Return the canonical lower-case event type string like
-        'response.output_text.delta'. Handles:
-        - Enum values (ResponsesAPIStreamEvents.*)
-        - dict payloads with a 'type' key
-        - plain strings as a last resort
+        'response.output_text.delta'. Handles enum, dict, or string types.
         """
         t = getattr(ev, "type", None)
-
-        # If it's an Enum (ResponsesAPIStreamEvents.*), prefer its .value
-        if t is not None and hasattr(t, "value"):
+        if t is not None and hasattr(t, "value"):  # Enum case
             return str(t.value).lower()
-
-        # If it's a dict-shaped event
-        if isinstance(ev, dict):
+        if isinstance(ev, dict):                  # Dict payload
             return str(ev.get("type", "")).lower()
-
-        # Fallback: best-effort stringification
-        return (str(t) if t else "").lower()
+        return (str(t) if t else "").lower()      # Fallback
 
     def _get(obj, key, default=None):
         if obj is None:
@@ -602,26 +593,24 @@ def _responses_events_to_chat_deltas(events_iter):
         return getattr(obj, key, default)
 
     for ev in events_iter:
-        #print("[events] ev:", ev, flush=True)
+        # print("[events] ev:", ev, flush=True)
         t = _etype(ev)
 
-        # Emit the role once at the beginning of a Responses stream
-        if not sent_role and (t.startswith("response.") or "response" in t):
+        # Emit assistant role once
+        if not sent_role and t.startswith("response."):
             sent_role = True
             yield {"choices": [{"delta": {"role": "assistant"}}]}
 
-        # ── Plain text streaming ──────────────────────────────────────────────────
+        # ── Plain text streaming ────────────────────────────────────────────────
         if t == "response.output_text.delta":
             chunk = _get(ev, "delta") or _get(ev, "text") or ""
             if chunk:
                 yield {"choices": [{"delta": {"content": chunk}}]}
             continue
         if t in ("response.output_text.done", "response.content_part.done"):
-            # nothing special to convert
-            continue
+            continue  # nothing to emit
 
-        # ── Function-call lifecycle (Responses schema) ───────────────────────────
-        # Start of a function_call item
+        # ── Function-call lifecycle ────────────────────────────────────────────
         if t == "response.output_item.added":
             item = _get(ev, "item")
             if _get(item, "type") == "function_call":
@@ -629,7 +618,7 @@ def _responses_events_to_chat_deltas(events_iter):
                 name = _get(item, "name")
                 if fid:
                     func_calls[fid] = {"name": name, "args": ""}
-                    # Optionally announce start with empty args so downstream sees the name early
+                    # Announce start with empty args so downstream knows the name
                     yield {
                         "choices": [{
                             "delta": {
@@ -641,20 +630,20 @@ def _responses_events_to_chat_deltas(events_iter):
                     }
             continue
 
-        # Streaming JSON arguments text (append!)
+        # Incremental JSON argument text
         if t == "response.function_call_arguments.delta":
             fid = _get(ev, "item_id")
             piece = _get(ev, "delta", "")
             state = func_calls.setdefault(fid or "<unknown>", {"name": None, "args": ""})
             state["args"] += piece or ""
+            # Emit only the NEW piece (Chat Completions semantics)
             yield {
                 "choices": [{
                     "delta": {
                         "tool_calls": [{
                             "function": {
                                 "name": state["name"] or "execute",
-                                # IMPORTANT: emit the cumulative string so your merge logic can diff it
-                                "arguments": state["args"],
+                                "arguments": piece or "",
                             }
                         }]
                     }
@@ -662,66 +651,34 @@ def _responses_events_to_chat_deltas(events_iter):
             }
             continue
 
-        # Arguments fully available as one string
+        # Do NOT emit on .done — just store final string (avoids duplicate append)
         if t == "response.function_call_arguments.done":
             fid = _get(ev, "item_id")
             final_args = _get(ev, "arguments", "")
             state = func_calls.setdefault(fid or "<unknown>", {"name": None, "args": ""})
-            # Prefer the provider's full arguments if present
             if isinstance(final_args, str) and len(final_args) >= len(state["args"]):
                 state["args"] = final_args
-            yield {
-                "choices": [{
-                    "delta": {
-                        "tool_calls": [{
-                            "function": {
-                                "name": state["name"] or "execute",
-                                "arguments": state["args"],
-                            }
-                        }]
-                    }
-                }]
-            }
-            continue
+            continue  # <-- no yield here
 
-        # Item completion: ensure the final cumulative args are visible downstream
+        # Also DO NOT emit again when the function_call item completes
         if t == "response.output_item.done":
             item = _get(ev, "item")
             if _get(item, "type") == "function_call":
-                fid = _get(item, "id")
-                state = func_calls.get(fid)
-                if state:
-                    yield {
-                        "choices": [{
-                            "delta": {
-                                "tool_calls": [{
-                                    "function": {
-                                        "name": state["name"] or "execute",
-                                        "arguments": state["args"],
-                                    }
-                                }]
-                            }
-                        }]
-                    }
+                # We've already streamed the incremental arguments pieces.
+                # Emitting again here would double-append. Do nothing.
+                pass
             continue
 
-        # ── (Optional) Fallbacks for other SDKs naming ───────────────────────────
-        # If some providers emit "response.tool_call.*" events, forward them raw.
-        if t.startswith("response.tool_call"):
-            yield {"tool_event": ev}
-            continue
-        if t.startswith("response.function_call"):
-            # Other function_call subtypes you don't explicitly map → pass through
-            yield {"function_call": ev}
-            continue
-
-        # ── Completion / error ───────────────────────────────────────────────────
+        # ── Completion / error ─────────────────────────────────────────────────
         if (t == "response.completed") or t.endswith("response_completed"):
             yield {"choices": [{"finish_reason": "stop"}]}
             break
         if (t == "response.error") or t.endswith("response_error"):
             yield {"choices": [{"finish_reason": "error"}]}
             break
+
+        # Any other event types are ignored
+        continue
 
 def fixed_litellm_completions(**params):
     """
