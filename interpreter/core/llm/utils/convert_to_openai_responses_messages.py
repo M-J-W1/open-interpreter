@@ -156,7 +156,13 @@ def convert_to_openai_responses_messages(
                 text = str(text)
             if text.strip() == "":
                 text = "No output"
-            out.append({"role": "user", "content": _parts_for_text("user", text)})
+            parts = _parts_for_text("user", text)
+            if m.get("role") in ("computer", "tool", "function"):
+                parts += _parts_for_text(
+                    "user",
+                    "This console STDOUT/STDERR is the result of the last tool output. What does it mean / are we done?",
+                )
+            out.append({"role": "user", "content": parts})
             continue
 
         if mtype == "code":
