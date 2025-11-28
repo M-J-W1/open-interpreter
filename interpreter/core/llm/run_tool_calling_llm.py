@@ -148,6 +148,22 @@ def process_messages(messages):
 
 
 def run_tool_calling_llm(llm, request_params):
+    def _extract_payload(txt: str):
+        stripped = (txt or "").strip()
+        fence = re.match(r"```(?:json)?\s*(\{[\s\S]*\})\s*```$", stripped)
+        if fence:
+            stripped = fence.group(1).strip()
+
+        if not (stripped.startswith("{") and stripped.endswith("}")):
+            return None
+
+        parsed = parse_partial_json(stripped)
+        if isinstance(parsed, dict) and parsed.get("code") is not None:
+            lang = parsed.get("language") if isinstance(parsed.get("language"), str) else None
+            return (lang or "python").strip(), parsed["code"]
+
+        return None
+
     # 1) Fill tool schema languages (once per call)
     tool_schema["parameters"]["properties"]["language"]["enum"] = [
         i.name.lower() for i in llm.interpreter.computer.terminal.languages
@@ -188,6 +204,7 @@ def run_tool_calling_llm(llm, request_params):
     accumulated_review = ""
     review_category = None
     buffer = ""
+    assistant_text = ""
 
     for chunk in llm.completions(**request_params):
         # If this is a Responses adapter delta without 'choices', skip
@@ -227,6 +244,8 @@ def run_tool_calling_llm(llm, request_params):
 
         # Stream assistant text / judge output
         if "content" in delta and delta["content"]:
+            if not function_call_detected:
+                assistant_text += delta["content"]
             if function_call_detected:
                 if review_category is None:
                     accumulated_review += delta["content"]
@@ -265,6 +284,13 @@ def run_tool_calling_llm(llm, request_params):
             else:
                 if llm.interpreter.verbose:
                     print("Arguments not a dict or no 'code' yet.")
+
+    # Fallback: if the model never produced a tool call but returned a pure code payload, execute it.
+    if not function_call_detected and assistant_text.strip():
+        payload = _extract_payload(assistant_text)
+        if payload:
+            lang, extracted_code = payload
+            yield {"type": "code", "format": lang or "python", "content": extracted_code}
 
     if os.getenv("INTERPRETER_REQUIRE_AUTHENTICATION", "False").lower() == "true":
         if function_call_detected and not accumulated_review:
