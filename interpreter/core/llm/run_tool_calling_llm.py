@@ -150,14 +150,43 @@ def process_messages(messages):
 def run_tool_calling_llm(llm, request_params):
     def _extract_payload(txt: str):
         stripped = (txt or "").strip()
-        fence = re.match(r"```(?:json)?\s*(\{[\s\S]*\})\s*```$", stripped)
+
+        # Prefer a fenced JSON block if present
+        fence = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", stripped)
         if fence:
-            stripped = fence.group(1).strip()
+            candidate = fence.group(1).strip()
+        else:
+            # Find the first balanced JSON object, allowing surrounding prose
+            start = stripped.find("{")
+            if start == -1:
+                return None
+            depth = 0
+            in_str = False
+            esc = False
+            end = None
+            for i, ch in enumerate(stripped[start:], start=start):
+                if in_str:
+                    if ch == "\\":
+                        esc = not esc
+                    elif ch == '"' and not esc:
+                        in_str = False
+                    else:
+                        esc = False
+                else:
+                    if ch == '"':
+                        in_str = True
+                    elif ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = i
+                            break
+            if end is None:
+                return None
+            candidate = stripped[start : end + 1]
 
-        if not (stripped.startswith("{") and stripped.endswith("}")):
-            return None
-
-        parsed = parse_partial_json(stripped)
+        parsed = parse_partial_json(candidate)
         if isinstance(parsed, dict) and parsed.get("code") is not None:
             lang = parsed.get("language") if isinstance(parsed.get("language"), str) else None
             return (lang or "python").strip(), parsed["code"]
