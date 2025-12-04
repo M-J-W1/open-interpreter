@@ -163,6 +163,16 @@ def convert_to_openai_responses_messages(
                     "This console STDOUT/STDERR is the result of the last tool output. What does it mean / are we done?",
                 )
             out.append({"role": "user", "content": parts})
+            # Nudge the model to keep using the execute() tool for follow-up work
+            out.append(
+                {
+                    "role": "developer",
+                    "content": _parts_for_text(
+                        "developer",
+                        "Reminder: use your execute() tool to run code when needed; this is a standing instruction, not feedback on the last turn.",
+                    ),
+                }
+            )
             continue
 
         if mtype == "code":
