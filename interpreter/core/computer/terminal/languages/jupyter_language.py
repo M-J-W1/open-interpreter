@@ -142,6 +142,10 @@ import matplotlib.pyplot as plt
             self._message_queue = message_queue
             self._execute_code(preprocessed_code, message_queue)
             yield from self._capture_output(message_queue)
+        except KeyboardInterrupt:
+            # Treat Ctrl+C as an interrupt request, not a traceback-producing error.
+            self._request_interrupt()
+            self._drain_after_interrupt()
         except GeneratorExit:
             self._request_interrupt()
             self._drain_after_interrupt()
@@ -300,6 +304,12 @@ import matplotlib.pyplot as plt
                     if DEBUG_MODE:
                         print(output)
                     yield output
+                    continue
+                except KeyboardInterrupt:
+                    # Interrupt execution but avoid surfacing a traceback to the user.
+                    self._request_interrupt()
+                    if self._drain_deadline is None:
+                        self._drain_deadline = time.time() + self._drain_timeout
                     continue
                 except queue.Empty:
                     pass
