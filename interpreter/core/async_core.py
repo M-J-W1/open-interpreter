@@ -128,7 +128,8 @@ class AsyncInterpreter(OpenInterpreter):
                             break
 
                     if self.stop_event.is_set():
-                        return
+                        # Let _respond_and_store drain interrupt output before stopping.
+                        pass
 
                     if self.print:
                         if "start" in chunk:

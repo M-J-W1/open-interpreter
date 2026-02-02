@@ -401,6 +401,10 @@ def respond(interpreter):
                 }
 
             except KeyboardInterrupt:
+                try:
+                    interpreter.computer.stop()
+                except Exception:
+                    pass
                 break  # It's fine.
             except:
                 yield {

@@ -318,13 +318,19 @@ class OpenInterpreter:
             return False
 
         last_flag_base = None
+        stop_requested = False
+        in_execution = False
 
         try:
             for chunk in respond(self):
                 # For async usage
                 if hasattr(self, "stop_event") and self.stop_event.is_set():
-                    print("Open Interpreter stopping.")
-                    break
+                    if not stop_requested:
+                        stop_requested = True
+                        try:
+                            self.computer.stop()
+                        except Exception:
+                            pass
 
                 if chunk["content"] == "":
                     continue
@@ -347,6 +353,7 @@ class OpenInterpreter:
 
                 # Handle the special "confirmation" chunk, which neither triggers a flag or creates a message
                 if chunk["type"] == "confirmation":
+                    in_execution = True
                     # Emit a end flag for the last message type, and reset last_flag_base
                     if last_flag_base:
                         yield {**last_flag_base, "end": True}
@@ -418,6 +425,15 @@ class OpenInterpreter:
                 # Yield the chunk itself
                 yield chunk
 
+                if (
+                    chunk.get("type") == "console"
+                    and chunk.get("format") == "active_line"
+                    and chunk.get("content") == None
+                ):
+                    in_execution = False
+                    if stop_requested:
+                        break
+
                 # Truncate output if it's console output
                 if chunk["type"] == "console" and chunk["format"] == "output":
                     self.messages[-1]["content"] = truncate_output(
@@ -426,10 +442,17 @@ class OpenInterpreter:
                         add_scrollbars=self.computer.import_computer_api,  # I consider scrollbars to be a computer API thing
                     )
 
+                if stop_requested and not in_execution:
+                    break
+
             # Yield a final end flag
             if last_flag_base:
                 yield {**last_flag_base, "end": True}
         except GeneratorExit:
+            try:
+                self.computer.interrupt(timeout=1.5)
+            except Exception:
+                pass
             raise  # gotta pass this up!
 
     def reset(self):
@@ -437,6 +460,12 @@ class OpenInterpreter:
         self.computer._has_imported_computer_api = False  # Flag reset
         self.messages = []
         self.last_messages_count = 0
+
+    def interrupt(self, timeout=1.5):
+        """
+        Interrupt active code execution and drain any pending output if supported.
+        """
+        return self.computer.interrupt(timeout=timeout)
 
     def display_message(self, markdown):
         # This is just handy for start_script in profiles.

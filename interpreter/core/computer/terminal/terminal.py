@@ -191,11 +191,23 @@ class Terminal:
                     print(chunk["content"], end="")
 
         except GeneratorExit:
-            self.stop()
+            self.interrupt()
 
     def stop(self):
         for language in self._active_languages.values():
             language.stop()
+
+    def interrupt(self, timeout=None):
+        drained = []
+        for language in self._active_languages.values():
+            if hasattr(language, "interrupt_and_drain"):
+                try:
+                    drained.extend(language.interrupt_and_drain(timeout=timeout))
+                except Exception:
+                    language.stop()
+            else:
+                language.stop()
+        return drained
 
     def terminate(self):
         for language_name in list(self._active_languages.keys()):

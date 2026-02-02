@@ -203,6 +203,12 @@ Do not import the computer module, or any of its sub-modules. They are already i
         """
         return self.terminal.stop()
 
+    def interrupt(self, timeout=None):
+        """
+        Interrupt active languages and drain any pending output if supported.
+        """
+        return self.terminal.interrupt(timeout=timeout)
+
     def terminate(self):
         """
         Shortcut for computer.terminal.terminate

@@ -51,6 +51,18 @@ class JupyterLanguage(BaseLanguage):
 
         self.listener_thread = None
         self.finish_flag = False
+        self._message_queue = None
+        self._capture_output_active = False
+        self._interrupt_requested = False
+        self._interrupt_sent = False
+        self._drain_deadline = None
+        self._drain_timeout = float(
+            os.environ.get("INTERPRETER_INTERRUPT_DRAIN_TIMEOUT", 1.5)
+        )
+        self._stale_drain_timeout = float(
+            os.environ.get("INTERPRETER_STALE_DRAIN_TIMEOUT", 0.2)
+        )
+        self._drain_lock = threading.Lock()
 
         # DISABLED because sometimes this bypasses sending it up to us for some reason!
         # Give it our same matplotlib backend
@@ -87,6 +99,8 @@ import matplotlib.pyplot as plt
         self.km.shutdown_kernel()
 
     def run(self, code):
+        self._ensure_previous_listener_stopped()
+        self._drain_stale_outputs()
         while not self.kc.is_alive():
             time.sleep(0.1)
 
@@ -114,6 +128,9 @@ import matplotlib.pyplot as plt
         #             file.write(function_code)
 
         self.finish_flag = False
+        self._interrupt_requested = False
+        self._interrupt_sent = False
+        self._drain_deadline = None
         try:
             try:
                 preprocessed_code = self.preprocess_code(code)
@@ -122,9 +139,12 @@ import matplotlib.pyplot as plt
                 # Also, for python, you don't need them! It's just for active_line and stuff. Just looks pretty.
                 preprocessed_code = code
             message_queue = queue.Queue()
+            self._message_queue = message_queue
             self._execute_code(preprocessed_code, message_queue)
             yield from self._capture_output(message_queue)
         except GeneratorExit:
+            self._request_interrupt()
+            self._drain_after_interrupt()
             raise  # gotta pass this up!
         except:
             content = traceback.format_exc()
@@ -134,20 +154,28 @@ import matplotlib.pyplot as plt
         def iopub_message_listener():
             max_retries = 100
             while True:
-                # If self.finish_flag = True, and we didn't set it (we do below), we need to stop. That's our "stop"
-                if self.finish_flag == True:
+                if self.finish_flag:
+                    if self._interrupt_requested and not self._interrupt_sent:
+                        try:
+                            self.km.interrupt_kernel()
+                        except Exception:
+                            pass
+                        self._interrupt_sent = True
+                    return
+                if self._interrupt_requested and not self._interrupt_sent:
                     if DEBUG_MODE:
                         print("interrupting kernel!!!!!")
-                    self.km.interrupt_kernel()
-                    return
+                    try:
+                        self.km.interrupt_kernel()
+                    except Exception:
+                        pass
+                    self._interrupt_sent = True
                 # For async usage
                 if (
                     hasattr(self.computer.interpreter, "stop_event")
                     and self.computer.interpreter.stop_event.is_set()
                 ):
-                    self.km.interrupt_kernel()
-                    self.finish_flag = True
-                    return
+                    self._request_interrupt()
                 try:
                     input_patience = int(
                         os.environ.get("INTERPRETER_TERMINAL_INPUT_PATIENCE", 15)
@@ -190,11 +218,16 @@ import matplotlib.pyplot as plt
                         if input_match:
                             user_input = input_match.group(1)
                             # Check if the user input is CTRL-C
-                            self.finish_flag = True
                             if user_input.upper() == "CTRL-C":
-                                self.finish_flag = True
+                                self._request_interrupt()
+                                if self._drain_deadline is None:
+                                    self._drain_deadline = (
+                                        time.time() + self._drain_timeout
+                                    )
                             else:
                                 self.kc.input(user_input)
+                                self._request_interrupt()
+                                self.finish_flag = True
 
                     msg = self.kc.iopub_channel.get_msg(timeout=0.05)
                     self.last_output_time = time.time()
@@ -221,76 +254,8 @@ import matplotlib.pyplot as plt
                         print("from thread: kernel is idle")
                     self.finish_flag = True
                     return
-
-                content = msg["content"]
-
-                if msg["msg_type"] == "stream":
-                    line, active_line = self.detect_active_line(content["text"])
-                    if active_line:
-                        message_queue.put(
-                            {
-                                "type": "console",
-                                "format": "active_line",
-                                "content": active_line,
-                            }
-                        )
-                    message_queue.put(
-                        {"type": "console", "format": "output", "content": line}
-                    )
-                elif msg["msg_type"] == "error":
-                    content = "\n".join(content["traceback"])
-                    # Remove color codes
-                    ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
-                    content = ansi_escape.sub("", content)
-                    message_queue.put(
-                        {
-                            "type": "console",
-                            "format": "output",
-                            "content": content,
-                        }
-                    )
-                elif msg["msg_type"] in ["display_data", "execute_result"]:
-                    data = content["data"]
-                    if "image/png" in data:
-                        message_queue.put(
-                            {
-                                "type": "image",
-                                "format": "base64.png",
-                                "content": data["image/png"],
-                            }
-                        )
-                    elif "image/jpeg" in data:
-                        message_queue.put(
-                            {
-                                "type": "image",
-                                "format": "base64.jpeg",
-                                "content": data["image/jpeg"],
-                            }
-                        )
-                    elif "text/html" in data:
-                        message_queue.put(
-                            {
-                                "type": "code",
-                                "format": "html",
-                                "content": data["text/html"],
-                            }
-                        )
-                    elif "text/plain" in data:
-                        message_queue.put(
-                            {
-                                "type": "console",
-                                "format": "output",
-                                "content": data["text/plain"],
-                            }
-                        )
-                    elif "application/javascript" in data:
-                        message_queue.put(
-                            {
-                                "type": "code",
-                                "format": "javascript",
-                                "content": data["application/javascript"],
-                            }
-                        )
+                for chunk in self._iopub_msg_to_chunks(msg):
+                    message_queue.put(chunk)
 
         self.listener_thread = threading.Thread(target=iopub_message_listener)
         # self.listener_thread.daemon = True
@@ -318,40 +283,199 @@ import matplotlib.pyplot as plt
         return line, None
 
     def _capture_output(self, message_queue):
-        while True:
-            time.sleep(0.1)
+        self._capture_output_active = True
+        try:
+            while True:
+                # For async usage
+                if (
+                    hasattr(self.computer.interpreter, "stop_event")
+                    and self.computer.interpreter.stop_event.is_set()
+                ):
+                    self._request_interrupt()
+                    if self._drain_deadline is None:
+                        self._drain_deadline = time.time() + self._drain_timeout
 
-            # For async usage
-            if (
-                hasattr(self.computer.interpreter, "stop_event")
-                and self.computer.interpreter.stop_event.is_set()
-            ):
-                self.finish_flag = True
-                break
-
-            if self.listener_thread:
                 try:
                     output = message_queue.get(timeout=0.1)
                     if DEBUG_MODE:
                         print(output)
                     yield output
-
+                    continue
                 except queue.Empty:
-                    if self.finish_flag:
-                        time.sleep(0.1)
+                    pass
 
-                        try:
-                            output = message_queue.get(timeout=0.1)
-                            if DEBUG_MODE:
-                                print(output)
-                            yield output
-                        except queue.Empty:
-                            if DEBUG_MODE:
-                                print("we're done")
-                            break
+                if self.finish_flag:
+                    if DEBUG_MODE:
+                        print("we're done")
+                    break
+
+                if self._drain_deadline and time.time() > self._drain_deadline:
+                    self.finish_flag = True
+                    if DEBUG_MODE:
+                        print("drain timeout reached")
+                    break
+        finally:
+            self._capture_output_active = False
+            self._drain_deadline = None
 
     def stop(self):
-        self.finish_flag = True
+        self._request_interrupt()
+        if self._drain_deadline is None:
+            self._drain_deadline = time.time() + self._drain_timeout
+
+    def interrupt_and_drain(self, timeout=None):
+        if timeout is None:
+            timeout = self._drain_timeout
+        self._request_interrupt()
+        if self._capture_output_active:
+            if self._drain_deadline is None:
+                self._drain_deadline = time.time() + timeout
+            return []
+        deadline = time.time() + timeout
+        drained = []
+
+        if self.listener_thread and self.listener_thread.is_alive() and self._message_queue:
+            while time.time() < deadline:
+                while True:
+                    try:
+                        drained.append(self._message_queue.get_nowait())
+                    except queue.Empty:
+                        break
+                if self.finish_flag and self._message_queue.empty():
+                    return drained
+                time.sleep(0.05)
+            self.finish_flag = True
+            return drained
+
+        drained.extend(self._drain_iopub_channel(timeout))
+        return drained
+
+    def _request_interrupt(self):
+        self._interrupt_requested = True
+
+    def _ensure_previous_listener_stopped(self):
+        if self.listener_thread and self.listener_thread.is_alive():
+            self._request_interrupt()
+            self.listener_thread.join(timeout=self._drain_timeout)
+            if self.listener_thread.is_alive():
+                self.finish_flag = True
+                self.listener_thread.join(timeout=0.2)
+
+    def _drain_stale_outputs(self):
+        if self._message_queue is not None:
+            self._drain_queue(self._message_queue)
+        if self.listener_thread and self.listener_thread.is_alive():
+            return
+        self._drain_iopub_channel(self._stale_drain_timeout)
+
+    def _drain_after_interrupt(self):
+        with self._drain_lock:
+            if self.listener_thread and self.listener_thread.is_alive():
+                self.listener_thread.join(timeout=self._drain_timeout)
+                self._drain_queue(self._message_queue)
+                return
+            self._drain_iopub_channel(self._drain_timeout)
+
+    def _drain_queue(self, q):
+        if q is None:
+            return
+        while True:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                return
+
+    def _drain_iopub_channel(self, timeout):
+        drained = []
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            try:
+                msg = self.kc.iopub_channel.get_msg(timeout=0.05)
+            except queue.Empty:
+                break
+            except Exception:
+                break
+            if (
+                msg.get("header", {}).get("msg_type") == "status"
+                and msg.get("content", {}).get("execution_state") == "idle"
+            ):
+                break
+            drained.extend(self._iopub_msg_to_chunks(msg))
+        return drained
+
+    def _iopub_msg_to_chunks(self, msg):
+        chunks = []
+        content = msg.get("content", {})
+        msg_type = msg.get("msg_type") or msg.get("header", {}).get("msg_type")
+
+        if msg_type == "stream":
+            line, active_line = self.detect_active_line(content.get("text", ""))
+            if active_line:
+                chunks.append(
+                    {
+                        "type": "console",
+                        "format": "active_line",
+                        "content": active_line,
+                    }
+                )
+            chunks.append(
+                {"type": "console", "format": "output", "content": line}
+            )
+        elif msg_type == "error":
+            tb = content.get("traceback", [])
+            text = "\n".join(tb)
+            ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+            text = ansi_escape.sub("", text)
+            chunks.append(
+                {
+                    "type": "console",
+                    "format": "output",
+                    "content": text,
+                }
+            )
+        elif msg_type in ["display_data", "execute_result"]:
+            data = content.get("data", {})
+            if "image/png" in data:
+                chunks.append(
+                    {
+                        "type": "image",
+                        "format": "base64.png",
+                        "content": data["image/png"],
+                    }
+                )
+            elif "image/jpeg" in data:
+                chunks.append(
+                    {
+                        "type": "image",
+                        "format": "base64.jpeg",
+                        "content": data["image/jpeg"],
+                    }
+                )
+            elif "text/html" in data:
+                chunks.append(
+                    {
+                        "type": "code",
+                        "format": "html",
+                        "content": data["text/html"],
+                    }
+                )
+            elif "text/plain" in data:
+                chunks.append(
+                    {
+                        "type": "console",
+                        "format": "output",
+                        "content": data["text/plain"],
+                    }
+                )
+            elif "application/javascript" in data:
+                chunks.append(
+                    {
+                        "type": "code",
+                        "format": "javascript",
+                        "content": data["application/javascript"],
+                    }
+                )
+        return chunks
 
     def preprocess_code(self, code):
         return preprocess_python(code)
