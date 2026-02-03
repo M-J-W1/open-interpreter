@@ -56,6 +56,8 @@ class JupyterLanguage(BaseLanguage):
         self._interrupt_requested = False
         self._interrupt_sent = False
         self._drain_deadline = None
+        self._interrupt_notice_emitted = False
+        self._pending_interrupt_notice = False
         self._drain_timeout = float(
             os.environ.get("INTERPRETER_INTERRUPT_DRAIN_TIMEOUT", 1.5)
         )
@@ -131,6 +133,8 @@ import matplotlib.pyplot as plt
         self._interrupt_requested = False
         self._interrupt_sent = False
         self._drain_deadline = None
+        self._interrupt_notice_emitted = False
+        self._pending_interrupt_notice = False
         try:
             try:
                 preprocessed_code = self.preprocess_code(code)
@@ -140,6 +144,8 @@ import matplotlib.pyplot as plt
                 preprocessed_code = code
             message_queue = queue.Queue()
             self._message_queue = message_queue
+            if self._pending_interrupt_notice:
+                self._emit_interrupt_notice()
             self._execute_code(preprocessed_code, message_queue)
             yield from self._capture_output(message_queue)
         except KeyboardInterrupt:
@@ -296,6 +302,7 @@ import matplotlib.pyplot as plt
                     and self.computer.interpreter.stop_event.is_set()
                 ):
                     self._request_interrupt()
+                    self._emit_interrupt_notice()
                     if self._drain_deadline is None:
                         self._drain_deadline = time.time() + self._drain_timeout
 
@@ -308,6 +315,7 @@ import matplotlib.pyplot as plt
                 except KeyboardInterrupt:
                     # Interrupt execution but avoid surfacing a traceback to the user.
                     self._request_interrupt()
+                    self._emit_interrupt_notice()
                     if self._drain_deadline is None:
                         self._drain_deadline = time.time() + self._drain_timeout
                     continue
@@ -362,6 +370,22 @@ import matplotlib.pyplot as plt
 
     def _request_interrupt(self):
         self._interrupt_requested = True
+        self._emit_interrupt_notice()
+
+    def _emit_interrupt_notice(self):
+        if self._interrupt_notice_emitted:
+            return
+        self._interrupt_notice_emitted = True
+        if self._message_queue is None:
+            self._pending_interrupt_notice = True
+            return
+        self._message_queue.put(
+            {
+                "type": "console",
+                "format": "output",
+                "content": "Execution interrupted",
+            }
+        )
 
     def _ensure_previous_listener_stopped(self):
         if self.listener_thread and self.listener_thread.is_alive():
